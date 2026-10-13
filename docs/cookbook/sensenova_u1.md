@@ -59,6 +59,47 @@ reduce single-request latency. Use a distinct GPU for each SenseNova replica.
 The existing T2I dynamic batching setting applies independently within each
 replica; I2I requests still run one at a time.
 
+## Tensor-Parallel Serving
+
+Split the dense Qwen3 backbone across two GPUs:
+
+```bash
+python -m sglang_omni.cli serve \
+  --config examples/configs/sensenova_u1_tp2.yaml \
+  --model-path "$MODEL_PATH" \
+  --port 8000
+```
+
+Alternatively, set `--generate.tp_size 2 --generate.gpu '[0, 1]'`.
+Supported TP sizes are 1, 2, 4, and 8. The attention head count, KV head count,
+and MLP intermediate width must all be divisible by the TP size. The current
+implementation supports the dense SenseNova-U1.5 Qwen3 backbone on CUDA
+(NCCL) and Ascend NPU (HCCL); MoE backbones are rejected.
+
+Both understanding and image-generation attention and MLP weights are sharded.
+Output projections use All-Reduce to keep hidden states replicated. Vision
+encoders, embeddings, normalization, and the pixel head remain replicated.
+Weights are loaded on CPU and sharded before accelerator placement, so TP
+reduces backbone accelerator memory but each worker still needs host memory
+to load the original checkpoint. Initial image noise is broadcast from rank
+zero for both T2I and I2I.
+
+TP requires `generate.factory.max_batch_size: 1`: independent dynamic batching
+on different ranks could produce different collective sequences. A single T2I
+request can still use `n > 1`. Cache-DiT and CUDA layerwise offload can be used
+with TP. Only the leader publishes the generated result.
+
+Once the leader dispatches a TP request, every rank completes its forward even
+if the request is cancelled; the stage discards cancelled results. Shutdown
+drains dispatched requests before unloading Cache-DiT and destroying the TP
+process group. The worker supervisor can still force termination if its
+shutdown timeout expires before draining finishes.
+
+For two replicas with two TP ranks each, use
+`examples/configs/sensenova_u1_dp2_tp2.yaml`. The flat
+`replica_devices: [0, 1, 2, 3]` assigns GPUs `[0, 1]` to the first replica and
+`[2, 3]` to the second. Every replica and TP rank must use a distinct GPU.
+
 ## Generate an Image
 
 ```bash
@@ -171,12 +212,13 @@ does not prove that model execution was batched.
 
 ## Current Scope
 
-- One GPU per DP replica. Tensor and sequence parallelism are not wired into
-  this native HF stage.
+- Each DP replica uses one GPU with TP=1, or a distinct GPU group with TP>1.
+  Dense Qwen3 tensor parallelism is supported; sequence parallelism is not.
 - BF16 is the supported initial dtype.
 - Dynamic batching defaults to off (`max_batch_size=1`).
-- Quantization, CPU offload, compact mode, and thinking/SRT KV transfer are not
-  exposed by the Omni stage.
+- Quantization, compact mode, and thinking/SRT KV transfer are not exposed by
+  the Omni stage. CUDA layerwise CPU offload is available through
+  `generate.factory.dit_layerwise_offload`.
 - Ascend I2I basic functionality and memory behavior have been validated on
   real hardware. Kernel-hit profiling and broader image-quality and performance
   characterization remain pending.

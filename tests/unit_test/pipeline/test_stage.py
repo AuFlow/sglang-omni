@@ -39,6 +39,63 @@ from tests.unit_test.fixtures.pipeline_fakes import (
 from tests.unit_test.pipeline.helpers import make_stage
 
 
+def test_tp_validation_rejects_before_fanout_and_preserves_next_request():
+    from unittest.mock import AsyncMock, Mock
+
+    from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
+
+    calls = [[], []]
+    collective = threading.Barrier(2, timeout=3)
+
+    def compute(rank, payload):
+        calls[rank].append(payload.request_id)
+        collective.wait()
+        return payload
+
+    def validate(payload):
+        if payload.request_id == "invalid":
+            raise ValueError("invalid request parameters")
+
+    schedulers = [
+        TensorParallelScheduler(
+            lambda payload, rank=rank: compute(rank, payload),
+            validate_request=Mock(side_effect=validate),
+        )
+        for rank in range(2)
+    ]
+    follower = make_stage(role="follower", scheduler=schedulers[1])
+    fanout = Mock()
+    leader = make_stage(role="leader", scheduler=schedulers[0], tp_fanout=fanout)
+    leader._send_failure = AsyncMock()
+
+    async def dispatch():
+        await leader._execute(make_stage_payload(request_id="invalid"))
+        leader._send_failure.assert_awaited_once_with(
+            "invalid", "invalid request parameters"
+        )
+        fanout.fanout_work.assert_not_called()
+        assert schedulers[0].inbox.empty()
+        valid = make_stage_payload(request_id="valid")
+        await leader._execute(valid)
+        fanout.fanout_work.assert_called_once_with(valid)
+        await follower._execute(valid)
+        schedulers[1].validate_request.assert_not_called()
+
+    asyncio.run(dispatch())
+    threads = [threading.Thread(target=scheduler.start) for scheduler in schedulers]
+    for scheduler in schedulers:
+        scheduler.stop()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=4)
+    assert all(not thread.is_alive() for thread in threads)
+    assert calls == [["valid"], ["valid"]]
+    assert all(
+        scheduler.outbox.get_nowait().type == "result" for scheduler in schedulers
+    )
+
+
 @pytest.fixture(autouse=True)
 def _cuda_ipc_capable_platform(monkeypatch):
     """These stage tests assert the cuda_ipc transport contract on any host, so pin
@@ -366,6 +423,46 @@ def test_stage_stop_warns_but_succeeds_on_a_stuck_scheduler_thread(
             release.set()
             if stage_obj._scheduler_thread is not None:
                 await asyncio.to_thread(stage_obj._scheduler_thread.join, 1.0)
+
+    asyncio.run(_run())
+
+
+def test_stage_stop_waits_past_timeout_for_collective_cleanup(monkeypatch) -> None:
+    from sglang_omni.scheduling.messages import IncomingMessage
+    from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
+
+    async def _run() -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        events = []
+
+        def compute(value):
+            entered.set()
+            assert release.wait(3)
+            events.append(value)
+            return value
+
+        scheduler = TensorParallelScheduler(
+            compute, shutdown_callback=lambda: events.append("cleanup")
+        )
+        scheduler.inbox.put(IncomingMessage("req", "new_request", "forward"))
+        stage_obj = make_stage(scheduler=scheduler)
+        monkeypatch.setattr(
+            stage_runtime_module, "_SCHEDULER_THREAD_JOIN_TIMEOUT_S", 0.01
+        )
+        await stage_obj.start()
+        stop_task = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            stop_task = asyncio.create_task(stage_obj.stop())
+            await asyncio.sleep(0.05)
+            assert not stop_task.done()
+            assert events == []
+        finally:
+            release.set()
+            await asyncio.wait_for(stop_task or stage_obj.stop(), timeout=2)
+        assert events == ["forward", "cleanup"]
+        assert stage_obj._scheduler_thread is None
 
     asyncio.run(_run())
 

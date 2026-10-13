@@ -601,6 +601,24 @@ async def test_tp_leader_skips_fanout_work_for_omni_scheduler() -> None:
             await stage_simple._execute(payload)
             fanout.fanout_work.assert_called_once_with(payload)
             assert simple_like.inbox.get_nowait().request_id == "req-1"
+
+            # Already dispatched collective work survives a follower abort;
+            # an aborted leader still drops work before dispatching it.
+            simple_like.preserve_tp_work_on_abort = True
+            stage_simple._aborted.add("req-1")
+            fanout.reset_mock()
+            await stage_simple._execute(payload)
+            fanout.fanout_work.assert_not_called()
+            assert simple_like.inbox.empty()
+            stage_simple.role = "follower"
+            await stage_simple._execute(payload)
+            assert simple_like.inbox.get_nowait().request_id == "req-1"
+            fanout.fanout_work.assert_not_called()
+
+            # Schedulers without the collective-work contract still skip it.
+            simple_like.preserve_tp_work_on_abort = False
+            await stage_simple._execute(payload)
+            assert simple_like.inbox.empty()
     finally:
         _purge_project_modules_with_fake_refs(before_import, fake_refs)
 

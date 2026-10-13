@@ -288,12 +288,18 @@ class Stage:
             # the thread instead of letting a daemon thread be reclaimed at
             # process exit. A slow thread is logged, not fatal: shutdown
             # correctness must not start depending on this timeout.
+            # Model cleanup and TP collectives require the thread to finish;
+            # those schedulers explicitly opt out of the best-effort timeout.
             scheduler_thread = self._scheduler_thread
             if scheduler_thread is not None:
                 try:
                     await asyncio.to_thread(
                         scheduler_thread.join,
-                        _SCHEDULER_THREAD_JOIN_TIMEOUT_S,
+                        (
+                            None
+                            if getattr(self.scheduler, "wait_for_shutdown", False)
+                            else _SCHEDULER_THREAD_JOIN_TIMEOUT_S
+                        ),
                     )
                 except Exception as exc:
                     _record_cleanup_error("scheduler thread", exc)
@@ -962,8 +968,22 @@ class Stage:
 
     async def _execute(self, payload: Any) -> None:
         request_id = payload.request_id
-        if request_id in self._aborted:
+        # A follower must execute work already dispatched by the TP leader,
+        # even when its independently delivered abort arrives first.
+        preserve_tp_work = self.role == "follower" and getattr(
+            self.scheduler, "preserve_tp_work_on_abort", False
+        )
+        if request_id in self._aborted and not preserve_tp_work:
             return
+        # Validate on the leader before any follower sees this work. A rejected
+        # request must never enter the collective sequence on any rank.
+        validate_request = getattr(self.scheduler, "validate_request", None)
+        if self.role != "follower" and validate_request is not None:
+            try:
+                validate_request(payload)
+            except ValueError as exc:
+                await self._send_failure(request_id, str(exc))
+                return
         _emit_event(
             request_id=request_id,
             stage=self.name,

@@ -178,10 +178,56 @@ class ResBlock(nn.Module):
 #         return self.final_layer(x, y)
 
 
+class _ConditionedFinalLayer(nn.Module):
+    def __init__(self, channels, out_channels):
+        super().__init__()
+        self.norm_final = nn.LayerNorm(channels, elementwise_affine=False, eps=1e-6)
+        self.linear = nn.Linear(channels, out_channels)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(channels, 2 * channels)
+        )
+
+    def forward(self, x, condition):
+        shift, scale = self.adaLN_modulation(condition).chunk(2, dim=-1)
+        return self.linear(modulate(self.norm_final(x), shift, scale))
+
+
+class _TimestepConditionedMLP(nn.Module):
+    """Deep flow head, separate from the patch-conditioned pixel MLP below."""
+
+    def __init__(self, input_dim, out_dim, dim, layers, mlp_ratio):
+        super().__init__()
+        self.time_embed = TimestepEmbedder(dim)
+        self.input_proj = nn.Linear(input_dim, dim)
+        self.res_blocks = nn.ModuleList(
+            [ResBlock(dim, mlp_ratio) for _ in range(layers)]
+        )
+        self.final_layer = _ConditionedFinalLayer(dim, out_dim)
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        nn.init.normal_(self.time_embed.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.time_embed.mlp[2].weight, std=0.02)
+        for block in (*self.res_blocks, self.final_layer):
+            nn.init.zeros_(block.adaLN_modulation[-1].weight)
+            nn.init.zeros_(block.adaLN_modulation[-1].bias)
+        nn.init.zeros_(self.final_layer.linear.weight)
+        nn.init.zeros_(self.final_layer.linear.bias)
+
+    def forward(self, x, timesteps):
+        x = self.input_proj(x)
+        condition = self.time_embed(timesteps)
+        for block in self.res_blocks:
+            x = block(x, condition)
+        return self.final_layer(x, condition)
+
+
 class FlowMatchingHead(nn.Module):
     def __init__(self, input_dim, out_dim, dim=1536, layers=12, mlp_ratio=1.0):
         super(FlowMatchingHead, self).__init__()
-        self.net = SimpleMLPAdaLN(
+        self.net = _TimestepConditionedMLP(
             input_dim=input_dim,
             out_dim=out_dim,
             dim=dim,

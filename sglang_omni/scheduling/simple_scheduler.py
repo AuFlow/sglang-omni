@@ -48,6 +48,7 @@ class SimpleScheduler:
         max_concurrency: int = 1,
         abort_callback: Callable[[str], None] | None = None,
         shutdown_callback: Callable[[], None] | None = None,
+        shutdown_on_compute_thread: bool = False,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
         self.outbox: _queue_mod.Queue[OutgoingMessage] = _queue_mod.Queue()
@@ -75,6 +76,10 @@ class SimpleScheduler:
         self._abort_callback = abort_callback
         self._shutdown_callback = shutdown_callback
         self._shutdown_lock = threading.Lock()
+        self.wait_for_shutdown = shutdown_on_compute_thread
+        self._shutdown_on_compute_thread = shutdown_on_compute_thread
+        self._started = False
+        self._stop_requested = False
         self._aborted: set[str] = set()
         self._abort_lock = threading.Lock()
         self._running = False
@@ -238,11 +243,20 @@ class SimpleScheduler:
 
     def start(self) -> None:
         """Run the processing loop (blocks the thread)."""
-        self._running = True
-        if self._max_concurrency > 1:
-            self._start_concurrent()
-        else:
-            self._start_serial()
+        with self._shutdown_lock:
+            if self._shutdown_on_compute_thread and self._stop_requested:
+                return
+            self._started = True
+            self._running = True
+        try:
+            if self._max_concurrency > 1:
+                self._start_concurrent()
+            else:
+                self._start_serial()
+        finally:
+            if self._shutdown_on_compute_thread:
+                self._running = False
+                self._run_shutdown_callback()
 
     def _start_serial(self) -> None:
         loop = asyncio.new_event_loop()
@@ -330,7 +344,14 @@ class SimpleScheduler:
             logger.debug("SimpleScheduler: _run_workers cancelled during shutdown")
 
     def stop(self) -> None:
-        self._running = False
+        with self._shutdown_lock:
+            self._running = False
+            self._stop_requested = True
+            if self._shutdown_on_compute_thread and self._started:
+                return
+        self._run_shutdown_callback()
+
+    def _run_shutdown_callback(self) -> None:
         with self._shutdown_lock:
             callback = self._shutdown_callback
             self._shutdown_callback = None

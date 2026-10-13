@@ -72,6 +72,36 @@ class SenseNovaCacheDit:
             return
         else:
             pass
+        config, effective_params = self.validate_request(
+            transformer, params=params, steps=steps
+        )
+
+        key = (
+            *sorted(effective_params.items()),
+            ("separate_cfg", int(branch_count > 1)),
+        )
+        if self.active_key is not None and key != self.active_key:
+            self.unmount()
+        else:
+            pass
+        if self.active_key is None:
+            if self.adapter is not None:
+                self.unmount()
+            else:
+                pass
+            self.mount(transformer, config, branch_count > 1)
+            self.active_key = key
+        else:
+            cache_dit.refresh_context(transformer, cache_config=config)
+
+    def validate_request(
+        self,
+        transformer: torch.nn.Module,
+        *,
+        params: JsonValue,
+        steps: int,
+    ) -> tuple[cache_dit.DBCacheConfig, dict[str, int | float]]:
+        """Validate effective settings without changing cache or model state."""
         _, request_params = resolve_cache_dit_params(
             {"enable_cache_dit": True, "cache_dit_params": params}, True
         )
@@ -96,23 +126,7 @@ class SenseNovaCacheDit:
         else:
             pass
 
-        key = (
-            *sorted(effective_params.items()),
-            ("separate_cfg", int(branch_count > 1)),
-        )
-        if self.active_key is not None and key != self.active_key:
-            self.unmount()
-        else:
-            pass
-        if self.active_key is None:
-            if self.adapter is not None:
-                self.unmount()
-            else:
-                pass
-            self.mount(transformer, config, branch_count > 1)
-            self.active_key = key
-        else:
-            cache_dit.refresh_context(transformer, cache_config=config)
+        return config, effective_params
 
     def mount(
         self,
