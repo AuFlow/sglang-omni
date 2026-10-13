@@ -3,12 +3,13 @@ import asyncio
 import base64
 import io
 import json
-from unittest.mock import Mock
+from unittest.mock import Mock, create_autospec
 
 import pytest
 import torch
 from fastapi.testclient import TestClient
 from PIL import Image
+from transformers import PreTrainedTokenizerBase
 
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateChunk
@@ -16,6 +17,7 @@ from sglang_omni.config import FactoryArgs, ProcessConfig
 from sglang_omni.config.manager import resolve_config_cls_for_model_path
 from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.models.sensenova_u1.config import SenseNovaU1PipelineConfig
+from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import NEOChatModel
 from sglang_omni.models.sensenova_u1.stages import (
     generate_image,
     generate_images,
@@ -65,14 +67,72 @@ async def test_image_result_cancellation_aborts_backend_and_closes_stream(discon
     assert closed.is_set()
 
 
+@pytest.fixture
+def tokenizer() -> PreTrainedTokenizerBase:
+    return create_autospec(
+        PreTrainedTokenizerBase, instance=True, return_value={"input_ids": [1, 2, 3]}
+    )
+
+
+@pytest.mark.parametrize(
+    ("reference_sizes", "downsample_ratio", "expected_image_tokens"),
+    [
+        ([(512, 512)], 0.5, 256),
+        ([(768, 512)], 0.5, 384),
+        ([(512, 512), (768, 512)], 0.5, 640),
+        ([(16, 8)], 0.5, 276),
+        ([(16, 8)], 0.25, 72),
+    ],
+)
+@pytest.mark.parametrize("batch_size", [1, 3])
+def test_i2i_model_counts_preprocessed_reference_tokens(
+    reference_sizes: list[tuple[int, int]],
+    downsample_ratio: float,
+    expected_image_tokens: int,
+    batch_size: int,
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    model = Mock(
+        spec=NEOChatModel,
+        _sensenova_compact_mode=False,
+        device=torch.device("cpu"),
+        patch_size=16,
+        downsample_ratio=downsample_ratio,
+        config=Mock(),
+    )
+    model._build_t2i_query.return_value = "<image>" * len(reference_sizes)
+    model._build_it2i_inputs.side_effect = RuntimeError("Stop before model inference")
+    token_usage: dict[str, int] = {}
+
+    with pytest.raises(RuntimeError, match="Stop before model inference"):
+        NEOChatModel.it2i_generate(
+            model,
+            tokenizer,
+            "edit the reference images",
+            [Image.new("RGB", size) for size in reference_sizes],
+            batch_size=batch_size,
+            image_size=(256, 256),
+            usage=token_usage,
+        )
+
+    assert token_usage == {"image_tokens": expected_image_tokens}
+    query = model._build_it2i_inputs.call_args.args[1]
+    assert query.count("<IMG_CONTEXT>") == expected_image_tokens
+    assert "<image>" not in query
+
+
 def test_t2i_api_returns_all_outputs_in_one_request():
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32)).save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
     class MultiClient:
         calls = 0
 
         async def generate(self, request, request_id):
             self.calls += 1
             assert request.extra_params["n"] == 3
-            yield GenerateChunk(request_id=request_id, images_b64=["a", "b", "c"])
+            yield GenerateChunk(request_id=request_id, images_b64=[encoded] * 3)
 
     backend = MultiClient()
     client = TestClient(
@@ -80,7 +140,9 @@ def test_t2i_api_returns_all_outputs_in_one_request():
     )
     response = client.post("/v1/images/generations", json={"prompt": "a cat", "n": 3})
     assert response.status_code == 200
-    assert response.json()["data"] == [{"b64_json": value} for value in ("a", "b", "c")]
+    assert (
+        response.json()["data"] == [{"b64_json": encoded, "output_format": "png"}] * 3
+    )
     assert backend.calls == 1
     assert (
         client.post(
@@ -90,7 +152,9 @@ def test_t2i_api_returns_all_outputs_in_one_request():
     )
 
 
-def test_t2i_stage_encodes_real_png_and_passes_source_arguments():
+def test_t2i_stage_encodes_real_png_and_passes_source_arguments(
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
     model = Mock()
     model.t2i_generate.return_value = torch.zeros((1, 3, 32, 64))
     payload = StagePayload(
@@ -102,7 +166,7 @@ def test_t2i_stage_encodes_real_png_and_passes_source_arguments():
         data=None,
     )
 
-    result = generate_image(payload, model, tokenizer=object())
+    result = generate_image(payload, model, tokenizer=tokenizer)
 
     kwargs = model.t2i_generate.call_args.kwargs
     assert kwargs["image_size"] == (64, 32)
@@ -113,7 +177,7 @@ def test_t2i_stage_encodes_real_png_and_passes_source_arguments():
     assert image.size == (64, 32)
 
 
-def test_t2i_stage_rejects_invalid_output():
+def test_t2i_stage_rejects_invalid_output(tokenizer: PreTrainedTokenizerBase) -> None:
     model = Mock()
     model.t2i_generate.return_value = torch.zeros((1, 3, 16, 16))
     payload = StagePayload(
@@ -122,7 +186,7 @@ def test_t2i_stage_rejects_invalid_output():
         data=None,
     )
     try:
-        generate_image(payload, model, tokenizer=object())
+        generate_image(payload, model, tokenizer=tokenizer)
     except ValueError as exc:
         assert "invalid image tensor" in str(exc)
     else:
@@ -134,7 +198,10 @@ def _decode_result_pixel(payload):
     return image.getpixel((0, 0))
 
 
-def test_t2i_stage_batches_compatible_requests_with_per_request_seeds():
+def test_t2i_stage_batches_compatible_requests_with_per_request_seeds(
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    tokenizer.side_effect = [{"input_ids": [1, 2, 3]}, {"input_ids": [1, 2, 3, 4, 5]}]
     model = Mock()
     model.t2i_generate.return_value = torch.stack(
         [torch.full((3, 32, 64), -1.0), torch.full((3, 32, 64), 1.0)]
@@ -154,14 +221,16 @@ def test_t2i_stage_batches_compatible_requests_with_per_request_seeds():
             ),
             data=None,
         )
-        for index, (prompt, seed) in enumerate([("a blue cat", 7), ("a red dog", 19)])
+        for index, (prompt, seed) in enumerate(
+            [("a blue cat", 7), ("a red dog on grass", 19)]
+        )
     ]
 
-    results = generate_images(payloads, model, tokenizer=object())
+    results = generate_images(payloads, model, tokenizer=tokenizer)
 
     args = model.t2i_generate.call_args.args
     kwargs = model.t2i_generate.call_args.kwargs
-    assert args[1] == ["a blue cat", "a red dog"]
+    assert args[1] == ["a blue cat", "a red dog on grass"]
     assert kwargs["batch_size"] == 2
     assert kwargs["seed"] == [7, 19]
     assert kwargs["image_size"] == (64, 32)
@@ -170,9 +239,19 @@ def test_t2i_stage_batches_compatible_requests_with_per_request_seeds():
         (0, 0, 0),
         (255, 255, 255),
     ]
+    assert [result.data["image_usage"] for result in results] == [
+        {
+            "input_tokens": count,
+            "total_tokens": count,
+            "input_tokens_details": {"text_tokens": count, "image_tokens": 0},
+        }
+        for count in (3, 5)
+    ]
 
 
-def test_t2i_stage_splits_incompatible_requests_and_restores_order():
+def test_t2i_stage_splits_incompatible_requests_and_restores_order(
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
     def t2i_generate(_tokenizer, prompt, *, image_size, batch_size, **_kwargs):
         if isinstance(prompt, list):
             assert prompt == ["first", "third"]
@@ -200,7 +279,7 @@ def test_t2i_stage_splits_incompatible_requests_and_restores_order():
         )
     ]
 
-    results = generate_images(payloads, model, tokenizer=object())
+    results = generate_images(payloads, model, tokenizer=tokenizer)
 
     assert model.t2i_generate.call_count == 2
     assert [result.request_id for result in results] == [
@@ -251,11 +330,36 @@ def test_image_generation_batch_key_separates_parameters_and_image_edits():
     assert image_generation_batch_key(edit) == ("image_edit", "edit")
 
 
-def test_i2i_stage_decodes_reference_and_passes_source_arguments():
+def test_i2i_stage_decodes_reference_and_passes_source_arguments(
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
     reference = io.BytesIO()
     Image.new("RGB", (16, 8), (255, 0, 0)).save(reference, format="PNG")
     model = Mock()
-    model.it2i_generate.return_value = torch.zeros((1, 3, 32, 64))
+
+    def edit_image(
+        model_tokenizer: PreTrainedTokenizerBase,
+        prompt: str,
+        references: list[Image.Image],
+        *,
+        usage: dict[str, int],
+        batch_size: int,
+        seed: int,
+        image_size: tuple[int, int],
+        cfg_scale: float,
+        img_cfg_scale: float,
+        cfg_norm: str,
+        timestep_shift: float,
+        enable_timestep_shift: bool,
+        cfg_interval: tuple[float, float],
+        num_steps: int,
+        t_eps: float,
+        think_mode: bool,
+    ) -> torch.Tensor:
+        usage["image_tokens"] = 276
+        return torch.zeros((1, 3, 32, 64))
+
+    model.it2i_generate.side_effect = edit_image
     payload = StagePayload(
         request_id="test",
         request=OmniRequest(
@@ -278,7 +382,7 @@ def test_i2i_stage_decodes_reference_and_passes_source_arguments():
         data=None,
     )
 
-    result = generate_image(payload, model, tokenizer=object())
+    result = generate_image(payload, model, tokenizer=tokenizer)
 
     args = model.it2i_generate.call_args.args
     kwargs = model.it2i_generate.call_args.kwargs
@@ -295,9 +399,86 @@ def test_i2i_stage_decodes_reference_and_passes_source_arguments():
     image = Image.open(io.BytesIO(base64.b64decode(result.data["image_b64"])))
     assert image.format == "PNG"
     assert image.size == (64, 32)
+    assert result.data["image_usage"] == {
+        "input_tokens": 3,
+        "total_tokens": 3,
+        "input_tokens_details": {"text_tokens": 3, "image_tokens": 276},
+    }
 
 
-def test_i2i_stage_rejects_invalid_reference_image():
+def test_mixed_image_batch_preserves_independent_usage(
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    reference = io.BytesIO()
+    Image.new("RGB", (32, 32)).save(reference, format="PNG")
+    encoded_reference = base64.b64encode(reference.getvalue()).decode("ascii")
+
+    def tokenize(prompt: str, *, add_special_tokens: bool) -> dict[str, list[int]]:
+        assert add_special_tokens is False
+        return {"input_ids": list(range(len(prompt.split())))}
+
+    tokenizer.side_effect = tokenize
+    model = Mock()
+    model.t2i_generate.side_effect = [
+        torch.zeros(2, 3, 32, 32),
+        torch.zeros(2, 3, 32, 32),
+    ]
+    model.it2i_generate.return_value = torch.zeros(1, 3, 32, 32)
+    requests = [
+        StagePayload(
+            request_id=str(index),
+            request=OmniRequest(
+                inputs=prompt,
+                params={"width": 32, "height": 32, "n": outputs},
+            ),
+            data=None,
+        )
+        for index, (prompt, outputs) in enumerate(
+            [("first", 1), ("multi output prompt here", 2), ("last text prompt", 1)]
+        )
+    ]
+    requests.insert(
+        1,
+        StagePayload(
+            request_id="edit",
+            request=OmniRequest(
+                inputs={
+                    "task": "image_edit",
+                    "prompt": "edit this",
+                    "image_b64": encoded_reference,
+                },
+                params={
+                    "width": 32,
+                    "height": 32,
+                    "size_explicit": True,
+                    "do_resize": False,
+                },
+            ),
+            data=None,
+        ),
+    )
+
+    results = generate_images(requests, model, tokenizer)
+
+    assert [result.request_id for result in results] == ["0", "edit", "1", "2"]
+    assert [result.data["image_usage"]["input_tokens"] for result in results] == [
+        1,
+        2,
+        4,
+        3,
+    ]
+    assert [result.data["image_usage"]["total_tokens"] for result in results] == [
+        1,
+        2,
+        4,
+        3,
+    ]
+    assert len(results[2].data["images_b64"]) == 2
+
+
+def test_i2i_stage_rejects_invalid_reference_image(
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
     payload = StagePayload(
         request_id="test",
         request=OmniRequest(
@@ -311,14 +492,16 @@ def test_i2i_stage_rejects_invalid_reference_image():
     )
 
     try:
-        generate_image(payload, Mock(), tokenizer=object())
+        generate_image(payload, Mock(), tokenizer=tokenizer)
     except ValueError as exc:
         assert "invalid reference image" in str(exc)
     else:
         raise AssertionError("Invalid reference image was accepted")
 
 
-def test_i2i_stage_preserves_reference_aspect_ratio_without_explicit_size():
+def test_i2i_stage_preserves_reference_aspect_ratio_without_explicit_size(
+    tokenizer: PreTrainedTokenizerBase,
+) -> None:
     reference = io.BytesIO()
     Image.new("RGB", (16, 8), (255, 0, 0)).save(reference, format="PNG")
     model = Mock()
@@ -346,7 +529,7 @@ def test_i2i_stage_preserves_reference_aspect_ratio_without_explicit_size():
         data=None,
     )
 
-    result = generate_image(payload, model, tokenizer=object())
+    result = generate_image(payload, model, tokenizer=tokenizer)
 
     assert model.it2i_generate.call_args.kwargs["image_size"] == (384, 192)
     image = Image.open(io.BytesIO(base64.b64decode(result.data["image_b64"])))

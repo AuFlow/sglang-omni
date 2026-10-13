@@ -46,6 +46,7 @@ class Client:
         self._coordinator = coordinator
         self._result_builder = result_builder or self._default_result_builder
         self._stream_builder = stream_builder or self._default_stream_builder
+        self.request_metrics = None
 
     # ------------------------------------------------------------------
     # Low-level generate (backward compatible)
@@ -56,8 +57,23 @@ class Client:
         request: GenerateRequest,
         request_id: str | None = None,
     ) -> AsyncIterator[GenerateChunk]:
+        request_id = request_id or str(uuid.uuid4())
+        source = self._generate_uninstrumented(request, request_id)
+        if self.request_metrics is not None:
+            source = self.request_metrics.generate(source, request.stream, request_id)
+        async with aclosing(source):
+            async for chunk in source:
+                yield chunk
+
+    async def _generate_uninstrumented(
+        self,
+        request: GenerateRequest,
+        request_id: str | None = None,
+    ) -> AsyncIterator[GenerateChunk]:
         req_id = request_id or str(uuid.uuid4())
         omni_request = self._build_omni_request(request)
+        if self.request_metrics is not None:
+            omni_request.metadata["omni_metrics_enabled"] = True
         if request.stream:
             coordinator_stream = self._coordinator.stream(req_id, omni_request)
             async with aclosing(coordinator_stream):
@@ -454,6 +470,15 @@ class Client:
                 usage["total_tokens"] = (prompt_tokens or 0) + (completion_tokens or 0)
         if "engine_time_s" not in usage and data.get("engine_time_s") is not None:
             usage["engine_time_s"] = data.get("engine_time_s")
+        details = usage.get("prompt_tokens_details", data.get("prompt_tokens_details"))
+        if details is not None:
+            usage["prompt_tokens_details"] = details
+        else:
+            cached_tokens = usage.get("cached_tokens", data.get("cached_tokens"))
+            if cached_tokens is not None:
+                usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+            else:
+                pass
         return UsageInfo.from_dict(usage)
 
     @staticmethod
@@ -500,9 +525,11 @@ class Client:
                 if weight_version is not None:
                     chunk.weight_version = weight_version
                 Client._set_audio_data(chunk, audio_result)
-                chunk.usage = Client._build_usage_info(
-                    decode_result
-                ) or Client._build_usage_info(audio_result)
+                chunk.usage = Client._build_usage_info(decode_result)
+                if chunk.usage is not None:
+                    chunk.text_usage_stage = decode_result.get("stage_name") or "decode"
+                else:
+                    chunk.usage = Client._build_usage_info(audio_result)
                 return chunk
             text = result.get("text")
             if isinstance(text, str):
@@ -545,6 +572,7 @@ class Client:
             ):
                 chunk.images_b64 = images_b64
             chunk.usage = Client._build_usage_info(result)
+            chunk.image_usage = result.get("image_usage")
             return chunk
         if isinstance(result, str):
             chunk.text = result

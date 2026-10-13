@@ -685,6 +685,12 @@ class Coordinator:
 
         # Single active terminal (original behavior) or no terminal_stages configured
         if len(expected_terminal_stages) <= 1:
+            if getattr(self, "request_metrics", None) is not None and isinstance(
+                msg.result, dict
+            ):
+                msg = replace(msg, result={**msg.result, "stage_name": from_stage})
+            else:
+                pass
             info.state = RequestState.COMPLETED
             info.result = msg.result
             if request_id in self._completion_futures:
@@ -722,6 +728,19 @@ class Coordinator:
     async def _handle_stream(self, msg: StreamMessage) -> None:
         """Handle a stream chunk from a stage."""
         request_id = msg.request_id
+        if msg.modality == "metrics":
+            metrics = getattr(self, "request_metrics", None)
+            if metrics is not None:
+                if "event" in msg.chunk:
+                    metrics.observe_scheduler_event(msg.from_stage, msg.chunk)
+                    return
+                metrics.observe_tokens(
+                    request_id,
+                    self._replica_topology.logical_name(msg.from_stage),
+                    msg.chunk["prompt_tokens"],
+                    msg.chunk["completion_tokens"],
+                )
+            return
         if request_id not in self._stream_queues:
             return
         _emit_event(

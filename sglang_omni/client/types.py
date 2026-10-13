@@ -5,7 +5,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, TypedDict
+
+
+class ImageInputTokensDetailsDict(TypedDict):
+    text_tokens: int | None
+    image_tokens: int
+
+
+class ImageUsageDict(TypedDict, total=False):
+    input_tokens: int
+    total_tokens: int
+    input_tokens_details: ImageInputTokensDetailsDict
 
 
 @dataclass
@@ -27,6 +38,7 @@ class UsageInfo:
     completion_tokens: int | None = None
     total_tokens: int | None = None
     engine_time_s: float | None = None
+    prompt_tokens_details: dict[str, int] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "UsageInfo | None":
@@ -37,6 +49,7 @@ class UsageInfo:
             completion_tokens=data.get("completion_tokens"),
             total_tokens=data.get("total_tokens"),
             engine_time_s=data.get("engine_time_s"),
+            prompt_tokens_details=data.get("prompt_tokens_details"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -145,6 +158,8 @@ class GenerateChunk:
     sample_rate: int | None = None
     image_b64: str | None = None
     images_b64: list[str] | None = None
+    image_usage: ImageUsageDict | None = None
+    text_usage_stage: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,6 +181,7 @@ class GenerateChunk:
             "sample_rate": self.sample_rate,
             "image_b64": self.image_b64,
             "images_b64": self.images_b64,
+            "image_usage": self.image_usage,
         }
 
 

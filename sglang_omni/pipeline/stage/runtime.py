@@ -15,6 +15,7 @@ import logging
 import os
 import queue as _queue_mod
 import threading
+import time
 from contextlib import suppress
 from dataclasses import replace
 from typing import Any, Awaitable, Callable, Literal
@@ -51,7 +52,7 @@ from sglang_omni.proto import (
     SubmitMessage,
 )
 from sglang_omni.relay.base import Relay
-from sglang_omni.scheduling.messages import IncomingMessage
+from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
 
 TorchProfiler = current_platform.get_torch_profiler()
 
@@ -161,6 +162,7 @@ class Stage:
         self._running = False
         self._aborted: set[str] = set()
         self._active_requests: set[str] = set()
+        self.metrics_started: dict[str, float] = {}
         self._request_arrivals: dict[str, object] = {}
         self._stream_queue: StreamQueue | None = None
         self._stream_chunk_counters: dict[tuple[str, str], int] = {}
@@ -984,6 +986,12 @@ class Stage:
             except ValueError as exc:
                 await self._send_failure(request_id, str(exc))
                 return
+        if (
+            self._owns_external_io
+            and isinstance(payload, StagePayload)
+            and payload.request.metadata.get("omni_metrics_enabled")
+        ):
+            self.metrics_started.setdefault(request_id, time.perf_counter())
         _emit_event(
             request_id=request_id,
             stage=self.name,
@@ -1050,6 +1058,12 @@ class Stage:
 
     async def _run_admin_operation(self, operation: Any) -> AdminResult:
         try:
+            if operation.action == "metrics":
+                snapshot = getattr(self.scheduler, "metrics_snapshot", None)
+                if snapshot is not None:
+                    return self._admin_result(
+                        operation, success=True, data=snapshot(), message="ok"
+                    )
             handler = getattr(self.scheduler, "admin", None)
             if handler is None:
                 return self._admin_result(
@@ -1153,6 +1167,15 @@ class Stage:
                         self._launch_kv_transfer(out.data)
                     else:
                         self._discard_kv_transfer(out.data)
+                elif out.type == "metrics":
+                    await self.control_plane.send_stream(
+                        StreamMessage(
+                            request_id=out.request_id,
+                            from_stage=self.name,
+                            chunk=out.data,
+                            modality="metrics",
+                        )
+                    )
                 elif out.request_id in self._active_requests:
                     if out.type == "result":
                         await self._route_result(out.request_id, out.data)
@@ -1860,6 +1883,7 @@ class Stage:
         await self.control_plane.send_stream(msg)
 
     async def _send_failure(self, request_id: str, error: str) -> None:
+        self.finish_stage_metrics(request_id, "error")
         self._record_aborted_request_id(request_id)
         if not self._owns_external_io:
             self._clear_request_state(request_id)
@@ -1874,10 +1898,26 @@ class Stage:
         )
         self._clear_request_state(request_id)
 
+    def finish_stage_metrics(self, request_id: str, outcome: str) -> None:
+        started = self.metrics_started.pop(request_id, None)
+        if started is not None:
+            self.scheduler.outbox.put(
+                OutgoingMessage(
+                    request_id=request_id,
+                    type="metrics",
+                    data={
+                        "event": "stage",
+                        "duration": time.perf_counter() - started,
+                        "outcome": outcome,
+                    },
+                )
+            )
+
     def _clear_request_state(
         self, request_id: str, *, keep_continuation: bool = False
     ) -> None:
         if not keep_continuation:
+            self.finish_stage_metrics(request_id, "completed")
             self._active_requests.discard(request_id)
             self._request_arrivals.pop(request_id, None)
         self.input_handler.cancel(request_id)
@@ -1941,6 +1981,7 @@ class Stage:
             ids -= set(to_remove)
 
     def _on_abort(self, request_id: str) -> None:
+        self.finish_stage_metrics(request_id, "aborted")
         self._record_aborted_request_id(request_id)
         self._comm.cleanup(request_id)
         self._clear_request_state(request_id)
