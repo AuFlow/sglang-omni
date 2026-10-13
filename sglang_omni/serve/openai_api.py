@@ -71,6 +71,7 @@ from sglang_omni.client.audio import (
     encode_pcm,
     select_audio_delta,
 )
+from sglang_omni.client.types import GenerateChunk
 from sglang_omni.config import (
     CustomVoiceConfig,
     RealtimeTranscriptionConfig,
@@ -138,9 +139,7 @@ from sglang_omni.serve.speech_limits import (
 from sglang_omni.serve.speech_service import SpeechRequestValidator
 from sglang_omni.serve.speech_voices import SpeakerSampleStore
 from sglang_omni.serve.speech_ws import SpeechWebSocketSession
-from sglang_omni.serve.streaming import (
-    STREAM_DONE_SENTINEL,
-)
+from sglang_omni.serve.streaming import STREAM_DONE_SENTINEL
 from sglang_omni.serve.streaming import (
     ClosableStreamingResponse as _ClosableStreamingResponse,
 )
@@ -1120,9 +1119,11 @@ def _register_image_generations(app: FastAPI) -> None:
                 raise RuntimeError(
                     f"SenseNova-U1 expected {req.n} images, got {len(images)}"
                 )
+            else:
+                pass
             return build_image_response(images, chunk.image_usage)
         except Exception as exc:
-            logger.exception("Image generation failed for request %s", request_id)
+            logger.exception(f"Image generation failed for request {request_id}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1172,6 +1173,8 @@ def _register_image_edits(app: FastAPI) -> None:
         try:
             if not 1 <= n <= 10:
                 raise ValueError("SenseNova-U1 n must be an integer between 1 and 10")
+            else:
+                pass
             num_outputs = n
             params = {"n": 1, "size_explicit": size is not None}
             if enable_cache_dit is not None:
@@ -1240,11 +1243,15 @@ def _register_image_edits(app: FastAPI) -> None:
                 )
                 if chunk.image_b64 is None:
                     raise RuntimeError("SenseNova-U1 generated no image")
+                else:
+                    pass
                 if output_index == 0:
                     image_usage = chunk.image_usage
+                else:
+                    pass
                 data.append(chunk.image_b64)
         except Exception as exc:
-            logger.exception("Image edit failed for request %s", parent_request_id)
+            logger.exception(f"Image edit failed for request {parent_request_id}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         if len(data) != num_outputs:
             raise HTTPException(
@@ -1254,16 +1261,24 @@ def _register_image_edits(app: FastAPI) -> None:
 
 
 async def _image_result_with_disconnect_watch(
-    request: Request, client: Client, gen_req: GenerateRequest, request_id: str
-):
-    stream = client.generate(gen_req, request_id=request_id)
-    async def consume_result():
-        result = None
+    request: Request,
+    client: Client,
+    generation_request: GenerateRequest,
+    request_id: str,
+) -> GenerateChunk:
+    stream = client.generate(generation_request, request_id=request_id)
+
+    async def consume_result() -> GenerateChunk:
+        result: GenerateChunk | None = None
         async for chunk in stream:
             if result is None:
                 result = chunk
+            else:
+                pass
         if result is None:
             raise RuntimeError("SenseNova-U1 returned no result")
+        else:
+            pass
         return result
 
     result_task = asyncio.create_task(consume_result())
@@ -1274,6 +1289,8 @@ async def _image_result_with_disconnect_watch(
         )
         if result_task in done:
             return result_task.result()
+        else:
+            pass
         raise asyncio.CancelledError
     except asyncio.CancelledError:
         await client.abort(request_id)
@@ -1281,8 +1298,12 @@ async def _image_result_with_disconnect_watch(
     finally:
         if not result_task.done():
             await _cancel_task_bounded(result_task)
+        else:
+            pass
         if not disconnect_task.done():
             await _cancel_task_bounded(disconnect_task)
+        else:
+            pass
         await _close_async_iterator_if_supported(stream)
 
 

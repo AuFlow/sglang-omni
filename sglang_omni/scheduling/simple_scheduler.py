@@ -76,10 +76,10 @@ class SimpleScheduler:
         self._abort_callback = abort_callback
         self._shutdown_callback = shutdown_callback
         self._shutdown_lock = threading.Lock()
-        self.wait_for_shutdown = shutdown_on_compute_thread
-        self._shutdown_on_compute_thread = shutdown_on_compute_thread
-        self._started = False
-        self._stop_requested = False
+        self.wait_for_shutdown: bool = shutdown_on_compute_thread
+        self.shutdown_on_compute_thread: bool = shutdown_on_compute_thread
+        self.started: bool = False
+        self.stop_requested: bool = False
         self._aborted: set[str] = set()
         self._abort_lock = threading.Lock()
         self._running = False
@@ -353,9 +353,11 @@ class SimpleScheduler:
     def start(self) -> None:
         """Run the processing loop (blocks the thread)."""
         with self._shutdown_lock:
-            if self._shutdown_on_compute_thread and self._stop_requested:
+            if self.shutdown_on_compute_thread and self.stop_requested:
                 return
-            self._started = True
+            else:
+                pass
+            self.started = True
             self._running = True
         try:
             if self._max_concurrency > 1:
@@ -363,9 +365,11 @@ class SimpleScheduler:
             else:
                 self._start_serial()
         finally:
-            if self._shutdown_on_compute_thread:
+            if self.shutdown_on_compute_thread:
                 self._running = False
                 self._run_shutdown_callback()
+            else:
+                pass
 
     def _start_serial(self) -> None:
         loop = asyncio.new_event_loop()
@@ -463,9 +467,11 @@ class SimpleScheduler:
             self.metrics_queued.clear()
         with self._shutdown_lock:
             self._running = False
-            self._stop_requested = True
-            if self._shutdown_on_compute_thread and self._started:
+            self.stop_requested = True
+            if self.shutdown_on_compute_thread and self.started:
                 return
+            else:
+                pass
         self._run_shutdown_callback()
 
     def _run_shutdown_callback(self) -> None:

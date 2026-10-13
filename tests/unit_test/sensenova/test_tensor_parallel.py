@@ -73,6 +73,8 @@ def _forward(model, inputs, suffix, caches=None, update_cache=True):
         if caches is not None:
             key = torch.cat([caches[index][0], key], dim=2)
             value = torch.cat([caches[index][1], value], dim=2)
+        else:
+            pass
         next_caches.append((key, value) if update_cache else caches[index])
         output = F.scaled_dot_product_attention(query, key, value, enable_gqa=True)
         output = output.transpose(1, 2).reshape(batch, sequence, -1)
@@ -125,7 +127,7 @@ def _distributed_parity(rank, size, rendezvous):
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("size", [2, 4])
+@pytest.mark.parametrize("size", [2, 4, 8])
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="requires Gloo")
 def test_distributed_attention_mlp_and_prefix_cache_parity(tmp_path, size):
     mp.spawn(
@@ -134,43 +136,6 @@ def test_distributed_attention_mlp_and_prefix_cache_parity(tmp_path, size):
         nprocs=size,
         join=True,
     )
-
-
-@pytest.mark.parametrize("size", [2, 4, 8])
-def test_weights_are_sharded_on_head_and_intermediate_boundaries(size):
-    torch.manual_seed(7)
-    reference = _model()
-    for rank in range(size):
-        model = copy.deepcopy(reference)
-        apply_tensor_parallel(model, rank, size, None)
-        for full, local in zip(
-            reference.language_model.model.layers, model.language_model.model.layers
-        ):
-            for suffix in ("", "_mot_gen"):
-                for name in ("q_proj", "k_proj", "v_proj"):
-                    expected = getattr(full.self_attn, name + suffix).weight.chunk(
-                        size
-                    )[rank]
-                    torch.testing.assert_close(
-                        getattr(local.self_attn, name + suffix).weight, expected
-                    )
-                expected = getattr(full.self_attn, "o_proj" + suffix).weight.chunk(
-                    size, dim=1
-                )[rank]
-                torch.testing.assert_close(
-                    getattr(local.self_attn, "o_proj" + suffix).weight, expected
-                )
-            for name in ("mlp", "mlp_mot_gen"):
-                full_mlp, local_mlp = getattr(full, name), getattr(local, name)
-                for projection in ("gate_proj", "up_proj"):
-                    torch.testing.assert_close(
-                        getattr(local_mlp, projection).weight,
-                        getattr(full_mlp, projection).weight.chunk(size)[rank],
-                    )
-                torch.testing.assert_close(
-                    local_mlp.down_proj.weight,
-                    full_mlp.down_proj.weight.chunk(size, dim=1)[rank],
-                )
 
 
 @pytest.mark.parametrize(

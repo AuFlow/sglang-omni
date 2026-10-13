@@ -539,6 +539,8 @@ def validate_generation_request(payload: StagePayload, model: NEOChatModel) -> N
         prompt = inputs.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("SenseNova-U1 requires a non-empty image edit prompt")
+        else:
+            pass
         options = SenseNovaU1ImageEditSampling.from_params(payload.request.params)
         references = _prepare_reference_images(inputs.get("image_b64"), options)
         _resolve_edit_output_size(references, options)
@@ -560,6 +562,8 @@ def validate_generation_request(payload: StagePayload, model: NEOChatModel) -> N
             params=options.cache_dit_params,
             steps=options.num_inference_steps,
         )
+    else:
+        pass
 
 
 def create_generation_executor(
@@ -587,6 +591,8 @@ def create_generation_executor(
     resolved_device = resolve_concrete_device(device, gpu_id)
     if tp_size > 1:
         validate_tp_device(resolved_device, nccl_port)
+    else:
+        pass
     offload_config = None
     if dit_layerwise_offload:
         if resolved_device.type != "cuda":
@@ -612,6 +618,8 @@ def create_generation_executor(
     if tp_size > 1:
         tp_group = initialize_tp(resolved_device, tp_rank, tp_size, nccl_port)
         apply_tensor_parallel(model, tp_rank, tp_size, tp_group)
+    else:
+        pass
     offload = None
     if offload_config is not None:
         offload = SenseNovaLayerwiseOffload(model, resolved_device, offload_config)
@@ -664,9 +672,13 @@ def create_generation_executor(
             finally:
                 if offload is not None:
                     offload.close()
+                else:
+                    pass
         finally:
             if tp_group is not None and torch.distributed.is_initialized():
                 torch.distributed.destroy_process_group()
+            else:
+                pass
 
     if tp_size > 1:
         return TensorParallelScheduler(
@@ -676,6 +688,8 @@ def create_generation_executor(
             ),
             shutdown_callback=_shutdown,
         )
+    else:
+        pass
 
     return SimpleScheduler(
         _generate,

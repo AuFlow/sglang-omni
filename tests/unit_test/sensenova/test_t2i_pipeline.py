@@ -26,10 +26,7 @@ from sglang_omni.models.sensenova_u1.stages import (
 )
 from sglang_omni.pipeline.replicas import expand_replica_stages
 from sglang_omni.proto.request import OmniRequest, StagePayload
-from sglang_omni.serve.openai_api import (
-    _image_result_with_disconnect_watch,
-    create_app,
-)
+from sglang_omni.serve.openai_api import _image_result_with_disconnect_watch, create_app
 
 
 @pytest.mark.asyncio
@@ -61,6 +58,8 @@ async def test_image_result_cancellation_aborts_backend_and_closes_stream(discon
     await asyncio.wait_for(entered.wait(), timeout=1)
     if not disconnect:
         task.cancel()
+    else:
+        pass
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1)
     assert aborted == ["req"]

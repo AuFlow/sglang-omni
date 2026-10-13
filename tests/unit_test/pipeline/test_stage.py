@@ -55,6 +55,8 @@ def test_tp_validation_rejects_before_fanout_and_preserves_next_request():
     def validate(payload):
         if payload.request_id == "invalid":
             raise ValueError("invalid request parameters")
+        else:
+            pass
 
     schedulers = [
         TensorParallelScheduler(

@@ -290,8 +290,7 @@ class Stage:
             # the thread instead of letting a daemon thread be reclaimed at
             # process exit. A slow thread is logged, not fatal: shutdown
             # correctness must not start depending on this timeout.
-            # Model cleanup and TP collectives require the thread to finish;
-            # those schedulers explicitly opt out of the best-effort timeout.
+            # note (AuFlow): TP cleanup must wait for all dispatched collectives.
             scheduler_thread = self._scheduler_thread
             if scheduler_thread is not None:
                 try:
@@ -970,15 +969,15 @@ class Stage:
 
     async def _execute(self, payload: Any) -> None:
         request_id = payload.request_id
-        # A follower must execute work already dispatched by the TP leader,
-        # even when its independently delivered abort arrives first.
+        # note (AuFlow): A follower abort must not skip dispatched collectives.
         preserve_tp_work = self.role == "follower" and getattr(
             self.scheduler, "preserve_tp_work_on_abort", False
         )
         if request_id in self._aborted and not preserve_tp_work:
             return
-        # Validate on the leader before any follower sees this work. A rejected
-        # request must never enter the collective sequence on any rank.
+        else:
+            pass
+        # note (AuFlow): Reject invalid work before any rank enters collectives.
         validate_request = getattr(self.scheduler, "validate_request", None)
         if self.role != "follower" and validate_request is not None:
             try:
@@ -986,6 +985,8 @@ class Stage:
             except ValueError as exc:
                 await self._send_failure(request_id, str(exc))
                 return
+        else:
+            pass
         if (
             self._owns_external_io
             and isinstance(payload, StagePayload)

@@ -57,6 +57,8 @@ def test_asymmetric_abort_preserves_collective_order():
         for thread in threads:
             if thread.ident is not None:
                 thread.join(timeout=4)
+            else:
+                pass
     assert all(not thread.is_alive() for thread in threads)
 
 
@@ -70,6 +72,8 @@ def test_shutdown_drains_work_before_cleanup_on_compute_thread():
         if request_id == "active":
             entered.set()
             assert release.wait(3)
+        else:
+            pass
         events.append(request_id)
         return request_id
 

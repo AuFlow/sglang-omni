@@ -27,6 +27,8 @@ def native_modules(monkeypatch):
         for key in list(sys.modules):
             if key.startswith(f"{name}."):
                 sys.modules.pop(key)
+            else:
+                pass
 
 
 def test_moe_config_detects_expert_count_without_model_type(native_modules):

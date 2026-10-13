@@ -3,80 +3,96 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
-from collections.abc import Callable
+from typing import Protocol
 
+from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.messages import IncomingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 
+class RequestCompute(Protocol):
+    def __call__(self, payload: StagePayload, /) -> StagePayload: ...
+
+
+class RequestValidator(Protocol):
+    def __call__(self, payload: StagePayload, /) -> None: ...
+
+
+class ShutdownCallback(Protocol):
+    def __call__(self) -> None: ...
+
+
 class TensorParallelScheduler(SimpleScheduler):
-    """Finish every dispatched forward, including aborted and queued requests.
+    """Drain dispatched TP forwards before cleanup, even after cancellation."""
 
-    The stage suppresses aborted results. Rank-local cancellation must never
-    remove a forward from the collective sequence. An ordered stop marker
-    drains dispatched work before cleanup runs on the scheduler thread.
-
-    Stage calls the optional synchronous validator on the leader before work
-    fanout. It must only inspect request settings, without running collectives
-    or modifying shared model state. ValueError rejects that request safely.
-    """
-
-    preserve_tp_work_on_abort = True
+    preserve_tp_work_on_abort: bool = True
 
     def __init__(
         self,
-        compute_fn: Callable,
+        request_compute: RequestCompute,
         *,
-        validate_request: Callable | None = None,
-        shutdown_callback: Callable[[], None] | None = None,
+        validate_request: RequestValidator | None = None,
+        shutdown_callback: ShutdownCallback | None = None,
     ) -> None:
-        super().__init__(compute_fn)
-        self.validate_request = validate_request
-        self.wait_for_shutdown = True
-        self._tp_shutdown_callback = shutdown_callback
-        self._stop_marker = IncomingMessage(request_id="", type="stream_done")
-        self._stop_requested = False
-        self._stop_lock = threading.Lock()
-        self._tp_compute_error: Exception | None = None
+        super().__init__(request_compute)
+        self.validate_request: RequestValidator | None = validate_request
+        self.wait_for_shutdown: bool = True
+        self.shutdown_callback: ShutdownCallback | None = shutdown_callback
+        self.stop_marker: IncomingMessage = IncomingMessage(
+            request_id="", type="stream_done"
+        )
+        self.stop_requested: bool = False
+        self.stop_lock: threading.Lock = threading.Lock()
+        self.compute_error: Exception | None = None
 
     def abort(self, request_id: str) -> None:
-        # Cancellation is handled by Stage; every rank still runs this work.
+        # note (AuFlow): Stage suppresses cancelled results; ranks must still run collectives.
         pass
 
     def _next_message(self) -> IncomingMessage | None:
-        msg = super()._next_message()
-        if msg is self._stop_marker:
+        message = super()._next_message()
+        if message is self.stop_marker:
             self._running = False
             return None
-        return msg
+        else:
+            pass
+        return message
 
     def start(self) -> None:
         try:
             super().start()
-            if self._tp_compute_error is not None:
+            if self.compute_error is not None:
                 raise RuntimeError(
                     "TP forward failed; the collective sequence cannot be reused"
-                ) from self._tp_compute_error
+                ) from self.compute_error
+            else:
+                pass
         finally:
             self._running = False
-            callback = self._tp_shutdown_callback
-            self._tp_shutdown_callback = None
+            callback = self.shutdown_callback
+            self.shutdown_callback = None
             if callback is not None:
                 callback()
+            else:
+                pass
 
-    def _run_single(self, msg, loop) -> None:
+    def _run_single(
+        self, message: IncomingMessage, loop: asyncio.AbstractEventLoop
+    ) -> None:
         try:
-            super()._run_single(msg, loop)
+            super()._run_single(message, loop)
         except Exception as exc:
-            # A rank-local failure may occur between collectives. Continuing
-            # with the next request could pair different layers across ranks.
-            self._tp_compute_error = exc
+            # note (AuFlow): A failed rank must not reuse collectives for the next request.
+            self.compute_error = exc
             self._running = False
             raise
 
     def stop(self) -> None:
-        with self._stop_lock:
-            if not self._stop_requested:
-                self._stop_requested = True
-                self.inbox.put(self._stop_marker)
+        with self.stop_lock:
+            if not self.stop_requested:
+                self.stop_requested = True
+                self.inbox.put(self.stop_marker)
+            else:
+                pass
