@@ -16,7 +16,7 @@ class SenseNovaU1Sampling:
     height: int = 2048
     num_inference_steps: int = 50
     guidance_scale: float = 4.0
-    seed: int = 42
+    seed: int | list[int] = 42
     enable_cache_dit: bool | None = None
     cache_dit_params: JsonValue = None
     n: int = 1
@@ -28,13 +28,31 @@ class SenseNovaU1Sampling:
             raise ValueError("SenseNova-U1 n must be an integer between 1 and 10")
         else:
             pass
+        seed = params.get("seed", 42)
+        seeds = seed if isinstance(seed, list) else [seed]
+        if not seeds or any(type(value) is not int or value < 0 for value in seeds):
+            raise ValueError("seed must be a non-negative int or list of ints")
+        if isinstance(seed, list) and len(seed) != n:
+            raise ValueError(
+                "seed list length must match num_outputs_per_prompt "
+                f"({n}) or total outputs ({n}), got {len(seed)}"
+            )
         enable_cache_dit, cache_dit_params = cache_dit_values(params)
         return cls(
-            **_validated_values(cls, {**params, "n": 1}, ("guidance_scale",)),
+            **{
+                **_validated_values(cls, {**params, "n": 1, "seed": seeds[0]}, ("guidance_scale",)),
+                "seed": seed,
+            },
             n=n,
             enable_cache_dit=enable_cache_dit,
             cache_dit_params=cache_dit_params,
         )
+
+    @property
+    def output_seeds(self) -> list[int]:
+        if isinstance(self.seed, list):
+            return list(self.seed)
+        return [self.seed + index for index in range(self.n)]
 
 
 @dataclass(frozen=True)

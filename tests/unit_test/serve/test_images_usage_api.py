@@ -15,8 +15,17 @@ from sglang_omni.serve.openai_api import create_app
 @pytest.mark.parametrize("editing", [False, True])
 @pytest.mark.parametrize("outputs", [1, 3])
 @pytest.mark.parametrize("fail_after_image", [False, True])
+@pytest.mark.parametrize(
+    "dimensions",
+    [
+        {"size": "64x32"},
+        {"width": "64", "height": "32"},
+        {"size": "128x32", "width": "64"},
+        {"size": "64x128", "height": "32"},
+    ],
+)
 def test_images_usage_and_complete_result_consumption(
-    editing: bool, outputs: int, fail_after_image: bool
+    editing: bool, outputs: int, fail_after_image: bool, dimensions: dict
 ) -> None:
     buffer = io.BytesIO()
     Image.new("RGB", (64, 32)).save(buffer, format="PNG")
@@ -30,6 +39,11 @@ def test_images_usage_and_complete_result_consumption(
         async def generate(
             self, request: GenerateRequest, request_id: str
         ) -> AsyncIterator[GenerateChunk]:
+            if not editing:
+                assert request.extra_params["width"] == 64
+                assert request.extra_params["height"] == 32
+                assert request.extra_params["enable_cache_dit"] is True
+                assert request.extra_params["cache_dit_params"] == {"Fn_compute_blocks": 2}
             yield self._default_result_builder(
                 request_id,
                 {
@@ -65,7 +79,15 @@ def test_images_usage_and_complete_result_consumption(
         else:
             response = client.post(
                 "/v1/images/generations",
-                json={"prompt": "a red mug", "size": "64x32", "n": outputs},
+                json={
+                    "prompt": "a red mug",
+                    "n": outputs,
+                    **dimensions,
+                    "extra_body": {
+                        "enable_cache_dit": True,
+                        "cache_dit_params": {"Fn_compute_blocks": 2},
+                    },
+                },
             )
     assert response.status_code == (500 if fail_after_image else 200)
     if fail_after_image:
