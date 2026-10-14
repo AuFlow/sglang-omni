@@ -429,6 +429,51 @@ def test_stage_stop_warns_but_succeeds_on_a_stuck_scheduler_thread(
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("role", ["leader", "follower"])
+def test_tp_failure_reports_before_blocked_cleanup(monkeypatch, role) -> None:
+    from sglang_omni.scheduling.messages import IncomingMessage
+    from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
+
+    async def _run() -> None:
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+
+        def compute(value):
+            raise RuntimeError("rank-local allocation failed")
+
+        def cleanup():
+            cleanup_entered.set()
+            assert release_cleanup.wait(5)
+
+        scheduler = TensorParallelScheduler(compute, shutdown_callback=cleanup)
+        scheduler.inbox.put(IncomingMessage("req", "new_request", "forward"))
+        stage_obj = make_stage(
+            role=role, scheduler=scheduler, control_plane=_CloseAwareControlPlane()
+        )
+        monkeypatch.setattr(
+            stage_runtime_module, "_SCHEDULER_THREAD_JOIN_TIMEOUT_S", 0.01
+        )
+        run_task = asyncio.create_task(stage_obj.run())
+        try:
+            assert await asyncio.to_thread(cleanup_entered.wait, 2)
+            with pytest.raises(RuntimeError, match="Scheduler thread"):
+                await asyncio.wait_for(run_task, timeout=2)
+            assert stage_obj._scheduler_crash_error is not None
+            assert scheduler.wait_for_shutdown is False
+            # The stage can exit and trigger group shutdown while this rank's
+            # cleanup is still blocked on its compute thread.
+            assert stage_obj._scheduler_thread.is_alive()
+        finally:
+            release_cleanup.set()
+            if stage_obj._scheduler_thread is not None:
+                await asyncio.to_thread(stage_obj._scheduler_thread.join, 2)
+            if not run_task.done():
+                run_task.cancel()
+                await asyncio.gather(run_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+
 def test_stage_stop_waits_past_timeout_for_collective_cleanup(monkeypatch) -> None:
     from sglang_omni.scheduling.messages import IncomingMessage
     from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler

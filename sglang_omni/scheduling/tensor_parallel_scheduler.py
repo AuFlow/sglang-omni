@@ -24,6 +24,10 @@ class ShutdownCallback(Protocol):
     def __call__(self) -> None: ...
 
 
+class FailureCallback(Protocol):
+    def __call__(self, exc: BaseException, /) -> None: ...
+
+
 class TensorParallelScheduler(SimpleScheduler):
     """Drain dispatched TP forwards before cleanup, even after cancellation."""
 
@@ -46,6 +50,7 @@ class TensorParallelScheduler(SimpleScheduler):
         self.stop_requested: bool = False
         self.stop_lock: threading.Lock = threading.Lock()
         self.compute_error: Exception | None = None
+        self.failure_callback: FailureCallback | None = None
 
     def abort(self, request_id: str) -> None:
         # note (AuFlow): Stage suppresses cancelled results; ranks must still run collectives.
@@ -69,6 +74,15 @@ class TensorParallelScheduler(SimpleScheduler):
                 ) from self.compute_error
             else:
                 pass
+        except BaseException as exc:
+            # note (AuFlow): Cleanup can block in a broken collective. Notify the
+            # stage first so the supervisor can shut down the entire TP group.
+            self.wait_for_shutdown = False
+            if self.failure_callback is not None:
+                self.failure_callback(exc)
+            else:
+                pass
+            raise
         finally:
             self._running = False
             callback = self.shutdown_callback

@@ -203,7 +203,9 @@ def test_group_initialization_uses_local_device_and_launcher_port(
     monkeypatch.setattr(
         dist, "init_process_group", lambda **kwargs: calls.update(kwargs)
     )
-    initialize_tp(resolved_device, 1, 2, 29991)
+    world_group = object()
+    monkeypatch.setattr(dist, "group", SimpleNamespace(WORLD=world_group))
+    assert initialize_tp(resolved_device, 1, 2, 29991) is world_group
     assert calls["device"] is resolved_device
     assert calls["backend"] == backend
     assert calls["init_method"] == "tcp://127.0.0.1:29991"

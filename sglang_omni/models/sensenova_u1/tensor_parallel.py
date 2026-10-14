@@ -62,7 +62,7 @@ def initialize_tp(
         world_size=tensor_parallel_size,
         timeout=timedelta(minutes=TP_INITIALIZATION_TIMEOUT_MINUTES),
     )
-    return dist.process_group.WORLD
+    return dist.group.WORLD
 
 
 class RowParallelLinear(nn.Linear):

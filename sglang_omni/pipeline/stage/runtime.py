@@ -220,6 +220,17 @@ class Stage:
         # Start scheduler in dedicated thread
         if self.scheduler is not None:
 
+            def _report_scheduler_failure(exc: BaseException) -> None:
+                self._running = False
+                loop = self._loop
+                if loop is not None and not loop.is_closed():
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_scheduler_crash(exc), loop
+                    )
+
+            if hasattr(self.scheduler, "failure_callback"):
+                self.scheduler.failure_callback = _report_scheduler_failure
+
             def _run_scheduler():
                 # Active-stage binding so ``emit(stage=None)`` from
                 # scheduler-thread descendants resolves to this stage.
@@ -240,13 +251,7 @@ class Stage:
                     self.scheduler.start()
                 except Exception as exc:
                     logger.exception("Scheduler thread for stage %s crashed", self.name)
-                    self._running = False
-                    loop = self._loop
-                    if loop is not None and not loop.is_closed():
-                        asyncio.run_coroutine_threadsafe(
-                            self._handle_scheduler_crash(exc),
-                            loop,
-                        )
+                    _report_scheduler_failure(exc)
 
             self._scheduler_thread = threading.Thread(
                 target=_run_scheduler,

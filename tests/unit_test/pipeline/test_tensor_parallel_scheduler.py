@@ -118,6 +118,45 @@ def test_stop_before_thread_start_still_drains_and_cleans_up():
     assert events == ["queued", "cleanup"]
 
 
+def test_failure_is_reported_while_cleanup_is_blocked():
+    cleanup_entered = threading.Event()
+    release_cleanup = threading.Event()
+    failures = []
+    errors = []
+
+    def compute(value):
+        raise RuntimeError("rank-local allocation failed")
+
+    def cleanup():
+        cleanup_entered.set()
+        assert release_cleanup.wait(3)
+
+    scheduler = TensorParallelScheduler(compute, shutdown_callback=cleanup)
+    scheduler.failure_callback = failures.append
+    scheduler.inbox.put(_request("failed"))
+
+    def run():
+        try:
+            scheduler.start()
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        assert cleanup_entered.wait(2)
+        assert thread.is_alive()
+        assert len(failures) == 1
+        assert str(failures[0].__cause__) == "rank-local allocation failed"
+        assert scheduler.wait_for_shutdown is False
+        assert scheduler.outbox.get_nowait().type == "error"
+    finally:
+        release_cleanup.set()
+        thread.join(timeout=4)
+    assert not thread.is_alive()
+    assert errors == failures
+
+
 def test_forward_failure_does_not_reuse_collectives_for_the_next_request():
     calls = []
 
