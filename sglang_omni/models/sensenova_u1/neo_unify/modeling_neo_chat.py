@@ -18,6 +18,8 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
+from sglang_omni.models.sensenova_u1.tensor_parallel import synchronize_tp_noise
+
 from .configuration_neo_chat import NEOChatConfig, NEOMoELLMConfig
 from .conversation import get_conv_template
 from .modeling_fm_modules import ConvDecoder, FlowMatchingHead, TimestepEmbedder
@@ -564,7 +566,7 @@ class NEOChatModel(PreTrainedModel):
             self.vision_model = vision_model
         else:
             self.vision_model = NEOVisionModel(config.vision_config)
-            vision_model_mot_gen = NEOVisionModel(config.vision_config)
+        vision_model_mot_gen = NEOVisionModel(config.vision_config)
         if language_model is not None:
             self.language_model = language_model
         else:
@@ -582,7 +584,9 @@ class NEOChatModel(PreTrainedModel):
         llm_hidden_size = self.config.llm_config.hidden_size
         self.use_deep_fm_head = self.config.fm_head_layers > 2
         self.use_pixel_head = self.config.use_pixel_head
-        if self.use_deep_fm_head:
+        if self.use_pixel_head:
+            fm_head = ConvDecoder(llm_hidden_size)
+        elif self.use_deep_fm_head:
             fm_head = FlowMatchingHead(
                 llm_hidden_size,
                 output_dim,
@@ -605,9 +609,6 @@ class NEOChatModel(PreTrainedModel):
                 "fm_head": fm_head,
             }
         )
-
-        if self.use_pixel_head:
-            self.fm_modules["fm_head"] = ConvDecoder(llm_hidden_size)
 
         self.concat_time_token_num = config.concat_time_token_num
         self.noise_scale = config.noise_scale
@@ -2837,6 +2838,7 @@ class NEOChatModel(PreTrainedModel):
             seed=seed,
         )
 
+        synchronize_tp_noise(self, image_prediction)
         attention_mask_condition = {"full_attention": None}
         attention_mask_img_condition = {"full_attention": None}
         attention_mask_uncondition = {"full_attention": None}
@@ -3390,6 +3392,7 @@ class NEOChatModel(PreTrainedModel):
             seed=seed,
         )
 
+        synchronize_tp_noise(self, image_prediction)
         attention_mask_condition = {"full_attention": None}
         if device.type == "npu" and batch_size > 1 and not npu_fia_available():
             condition_key_valid_mask = condition_key_valid_mask.expand(batch_size, -1)

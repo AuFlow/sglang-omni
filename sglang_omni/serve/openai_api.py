@@ -71,6 +71,7 @@ from sglang_omni.client.audio import (
     encode_pcm,
     select_audio_delta,
 )
+from sglang_omni.client.types import GenerateChunk
 from sglang_omni.config import (
     CustomVoiceConfig,
     RealtimeTranscriptionConfig,
@@ -1070,7 +1071,9 @@ def _register_image_generations(app: FastAPI) -> None:
     from sglang_omni.serve.image_request import resolve_image_generation_params
 
     @app.post("/v1/images/generations", response_model=ImageGenerationResponse)
-    async def image_generations(req: ImageGenerationRequest) -> ImageGenerationResponse:
+    async def image_generations(
+        req: ImageGenerationRequest, request: Request
+    ) -> ImageGenerationResponse:
         if req.model is not None and req.model != app.state.model_name:
             raise HTTPException(status_code=400, detail="Unknown image model")
         try:
@@ -1080,7 +1083,7 @@ def _register_image_generations(app: FastAPI) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        request = GenerateRequest(
+        gen_req = GenerateRequest(
             model=app.state.model_name,
             prompt=req.prompt,
             extra_params=params,
@@ -1088,32 +1091,23 @@ def _register_image_generations(app: FastAPI) -> None:
             stream=False,
         )
         request_id = str(uuid.uuid4())
-        response = None
         try:
-            async for chunk in app.state.client.generate(
-                request, request_id=request_id
-            ):
-                if response is not None:
-                    continue
-                else:
-                    pass
-                images = chunk.images_b64 or (
-                    [chunk.image_b64] if chunk.image_b64 is not None else []
-                )
-                if len(images) != params["n"]:
-                    raise RuntimeError(
-                        f"SenseNova-U1 expected {params['n']} images, got {len(images)}"
-                    )
-                response = build_image_response(images, chunk.image_usage)
-        except Exception as exc:
-            logger.exception("Image generation failed for request %s", request_id)
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        if response is not None:
-            return response
-        else:
-            raise HTTPException(
-                status_code=500, detail="SenseNova-U1 returned no result"
+            chunk = await _image_result_with_disconnect_watch(
+                request, app.state.client, gen_req, request_id
             )
+            images = chunk.images_b64 or (
+                [chunk.image_b64] if chunk.image_b64 is not None else []
+            )
+            if len(images) != params["n"]:
+                raise RuntimeError(
+                    f"SenseNova-U1 expected {params['n']} images, got {len(images)}"
+                )
+            else:
+                pass
+            return build_image_response(images, chunk.image_usage)
+        except Exception as exc:
+            logger.exception(f"Image generation failed for request {request_id}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def _register_image_edits(app: FastAPI) -> None:
@@ -1122,6 +1116,7 @@ def _register_image_edits(app: FastAPI) -> None:
 
     @app.post("/v1/images/edits", response_model=ImageGenerationResponse)
     async def image_edits(
+        request: Request,
         image: list[UploadFile] | None = File(default=None),  # noqa: B008
         image_array: list[UploadFile] | None = File(  # noqa: B008
             default=None, alias="image[]"
@@ -1159,7 +1154,11 @@ def _register_image_edits(app: FastAPI) -> None:
                 detail="SenseNova-U1 image edits only support response_format=b64_json",
             )
         try:
-            num_outputs = max(1, min(int(n or 1), 10))
+            if not 1 <= n <= 10:
+                raise ValueError("SenseNova-U1 n must be an integer between 1 and 10")
+            else:
+                pass
+            num_outputs = n
             params = {"n": 1, "size_explicit": size is not None}
             if enable_cache_dit is not None:
                 params["enable_cache_dit"] = enable_cache_dit
@@ -1210,7 +1209,7 @@ def _register_image_edits(app: FastAPI) -> None:
             for output_index in range(num_outputs):
                 output_params = dict(params)
                 output_params["seed"] = options.seed + output_index
-                request = GenerateRequest(
+                gen_req = GenerateRequest(
                     model=app.state.model_name,
                     prompt={
                         "task": "image_edit",
@@ -1222,33 +1221,73 @@ def _register_image_edits(app: FastAPI) -> None:
                     stream=False,
                 )
                 request_id = f"{parent_request_id}:{output_index}"
-                result = None
-                async for chunk in app.state.client.generate(
-                    request, request_id=request_id
-                ):
-                    if result is not None:
-                        continue
-                    else:
-                        pass
-                    if chunk.image_b64 is None:
-                        raise RuntimeError("SenseNova-U1 generated no image")
-                    result = chunk.image_b64
-                    if output_index == 0:
-                        image_usage = chunk.image_usage
-                    else:
-                        pass
-                if result is not None:
-                    data.append(result)
+                chunk = await _image_result_with_disconnect_watch(
+                    request, app.state.client, gen_req, request_id
+                )
+                if chunk.image_b64 is None:
+                    raise RuntimeError("SenseNova-U1 generated no image")
                 else:
                     pass
+                if output_index == 0:
+                    image_usage = chunk.image_usage
+                else:
+                    pass
+                data.append(chunk.image_b64)
         except Exception as exc:
-            logger.exception("Image edit failed for request %s", parent_request_id)
+            logger.exception(f"Image edit failed for request {parent_request_id}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         if len(data) != num_outputs:
             raise HTTPException(
                 status_code=500, detail="SenseNova-U1 returned no result"
             )
         return build_image_response(data, image_usage)
+
+
+async def _image_result_with_disconnect_watch(
+    request: Request,
+    client: Client,
+    generation_request: GenerateRequest,
+    request_id: str,
+) -> GenerateChunk:
+    stream = client.generate(generation_request, request_id=request_id)
+
+    async def consume_result() -> GenerateChunk:
+        result: GenerateChunk | None = None
+        async for chunk in stream:
+            if result is None:
+                result = chunk
+            else:
+                pass
+        if result is None:
+            raise RuntimeError("SenseNova-U1 returned no result")
+        else:
+            pass
+        return result
+
+    result_task = asyncio.create_task(consume_result())
+    disconnect_task = asyncio.create_task(_wait_for_request_disconnect(request))
+    try:
+        done, _ = await asyncio.wait(
+            {result_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if result_task in done:
+            return result_task.result()
+        else:
+            pass
+        raise asyncio.CancelledError
+    except asyncio.CancelledError:
+        await client.abort(request_id)
+        raise
+    finally:
+        if not result_task.done():
+            await _cancel_task_bounded(result_task)
+        else:
+            pass
+        if not disconnect_task.done():
+            await _cancel_task_bounded(disconnect_task)
+        else:
+            pass
+        await _close_async_iterator_if_supported(stream)
 
 
 async def _read_image_edit_upload(image: UploadFile) -> bytes:

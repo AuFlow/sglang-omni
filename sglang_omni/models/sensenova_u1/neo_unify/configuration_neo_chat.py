@@ -133,11 +133,12 @@ def _is_moe_llm_config(llm_config) -> bool:
         arch_str = str(arch)
         if "Moe" in arch_str or "MoE" in arch_str:
             return True
-    return (
-        bool(has_num_experts)
-        and getattr(llm_config, "num_experts", 0)
-        and int(getattr(llm_config, "num_experts", 0)) > 1
+    num_experts = (
+        llm_config.get("num_experts", 0)
+        if isinstance(llm_config, dict)
+        else getattr(llm_config, "num_experts", 0)
     )
+    return bool(has_num_experts and num_experts and int(num_experts) > 1)
 
 
 def _build_llm_config(llm_config):

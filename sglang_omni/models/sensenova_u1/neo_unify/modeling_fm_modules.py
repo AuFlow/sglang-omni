@@ -178,14 +178,81 @@ class ResBlock(nn.Module):
 #         return self.final_layer(x, y)
 
 
+class ConditionedFinalLayer(nn.Module):
+    def __init__(self, hidden_feature_count: int, output_feature_count: int) -> None:
+        super().__init__()
+        self.norm_final: nn.LayerNorm = nn.LayerNorm(
+            hidden_feature_count, elementwise_affine=False, eps=1e-6
+        )
+        self.linear: nn.Linear = nn.Linear(hidden_feature_count, output_feature_count)
+        self.adaLN_modulation: nn.Sequential = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_feature_count, 2 * hidden_feature_count)
+        )
+
+    def forward(
+        self, hidden_states: torch.Tensor, timestep_embedding: torch.Tensor
+    ) -> torch.Tensor:
+        shift, scale = self.adaLN_modulation(timestep_embedding).chunk(2, dim=-1)
+        return self.linear(modulate(self.norm_final(hidden_states), shift, scale))
+
+
+class TimestepConditionedMLP(nn.Module):
+    """Deep flow head, separate from the patch-conditioned pixel MLP below."""
+
+    def __init__(
+        self,
+        input_feature_count: int,
+        output_feature_count: int,
+        hidden_feature_count: int,
+        layer_count: int,
+        mlp_ratio: float,
+    ) -> None:
+        super().__init__()
+        self.time_embed: TimestepEmbedder = TimestepEmbedder(hidden_feature_count)
+        self.input_proj: nn.Linear = nn.Linear(
+            input_feature_count, hidden_feature_count
+        )
+        self.res_blocks: nn.ModuleList = nn.ModuleList(
+            [ResBlock(hidden_feature_count, mlp_ratio) for _ in range(layer_count)]
+        )
+        self.final_layer: ConditionedFinalLayer = ConditionedFinalLayer(
+            hidden_feature_count, output_feature_count
+        )
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+                else:
+                    pass
+            else:
+                pass
+        nn.init.normal_(self.time_embed.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.time_embed.mlp[2].weight, std=0.02)
+        for block in (*self.res_blocks, self.final_layer):
+            nn.init.zeros_(block.adaLN_modulation[-1].weight)
+            nn.init.zeros_(block.adaLN_modulation[-1].bias)
+        nn.init.zeros_(self.final_layer.linear.weight)
+        nn.init.zeros_(self.final_layer.linear.bias)
+
+    def forward(
+        self, hidden_states: torch.Tensor, timesteps: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_states = self.input_proj(hidden_states)
+        timestep_embedding = self.time_embed(timesteps)
+        for residual_block in self.res_blocks:
+            hidden_states = residual_block(hidden_states, timestep_embedding)
+        return self.final_layer(hidden_states, timestep_embedding)
+
+
 class FlowMatchingHead(nn.Module):
     def __init__(self, input_dim, out_dim, dim=1536, layers=12, mlp_ratio=1.0):
         super(FlowMatchingHead, self).__init__()
-        self.net = SimpleMLPAdaLN(
-            input_dim=input_dim,
-            out_dim=out_dim,
-            dim=dim,
-            layers=layers,
+        self.net = TimestepConditionedMLP(
+            input_feature_count=input_dim,
+            output_feature_count=out_dim,
+            hidden_feature_count=dim,
+            layer_count=layers,
             mlp_ratio=mlp_ratio,
         )
 

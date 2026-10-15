@@ -220,6 +220,17 @@ class Stage:
         # Start scheduler in dedicated thread
         if self.scheduler is not None:
 
+            def _report_scheduler_failure(exc: BaseException) -> None:
+                self._running = False
+                loop = self._loop
+                if loop is not None and not loop.is_closed():
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_scheduler_crash(exc), loop
+                    )
+
+            if hasattr(self.scheduler, "failure_callback"):
+                self.scheduler.failure_callback = _report_scheduler_failure
+
             def _run_scheduler():
                 # Active-stage binding so ``emit(stage=None)`` from
                 # scheduler-thread descendants resolves to this stage.
@@ -240,13 +251,7 @@ class Stage:
                     self.scheduler.start()
                 except Exception as exc:
                     logger.exception("Scheduler thread for stage %s crashed", self.name)
-                    self._running = False
-                    loop = self._loop
-                    if loop is not None and not loop.is_closed():
-                        asyncio.run_coroutine_threadsafe(
-                            self._handle_scheduler_crash(exc),
-                            loop,
-                        )
+                    _report_scheduler_failure(exc)
 
             self._scheduler_thread = threading.Thread(
                 target=_run_scheduler,
@@ -290,12 +295,17 @@ class Stage:
             # the thread instead of letting a daemon thread be reclaimed at
             # process exit. A slow thread is logged, not fatal: shutdown
             # correctness must not start depending on this timeout.
+            # note (AuFlow): TP cleanup must wait for all dispatched collectives.
             scheduler_thread = self._scheduler_thread
             if scheduler_thread is not None:
                 try:
                     await asyncio.to_thread(
                         scheduler_thread.join,
-                        _SCHEDULER_THREAD_JOIN_TIMEOUT_S,
+                        (
+                            None
+                            if getattr(self.scheduler, "wait_for_shutdown", False)
+                            else _SCHEDULER_THREAD_JOIN_TIMEOUT_S
+                        ),
                     )
                 except Exception as exc:
                     _record_cleanup_error("scheduler thread", exc)
@@ -964,8 +974,24 @@ class Stage:
 
     async def _execute(self, payload: Any) -> None:
         request_id = payload.request_id
-        if request_id in self._aborted:
+        # note (AuFlow): A follower abort must not skip dispatched collectives.
+        preserve_tp_work = self.role == "follower" and getattr(
+            self.scheduler, "preserve_tp_work_on_abort", False
+        )
+        if request_id in self._aborted and not preserve_tp_work:
             return
+        else:
+            pass
+        # note (AuFlow): Reject invalid work before any rank enters collectives.
+        validate_request = getattr(self.scheduler, "validate_request", None)
+        if self.role != "follower" and validate_request is not None:
+            try:
+                validate_request(payload)
+            except ValueError as exc:
+                await self._send_failure(request_id, str(exc))
+                return
+        else:
+            pass
         if (
             self._owns_external_io
             and isinstance(payload, StagePayload)

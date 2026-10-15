@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import base64
 import io
 import json
@@ -25,7 +26,44 @@ from sglang_omni.models.sensenova_u1.stages import (
 )
 from sglang_omni.pipeline.replicas import expand_replica_stages
 from sglang_omni.proto.request import OmniRequest, StagePayload
-from sglang_omni.serve.openai_api import create_app
+from sglang_omni.serve.openai_api import _image_result_with_disconnect_watch, create_app
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disconnect", [True, False])
+async def test_image_result_cancellation_aborts_backend_and_closes_stream(disconnect):
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+    aborted = []
+
+    class Request:
+        async def is_disconnected(self):
+            return disconnect and entered.is_set()
+
+    class ImageClient:
+        async def generate(self, request, request_id):
+            try:
+                entered.set()
+                await asyncio.Event().wait()
+                yield None
+            finally:
+                closed.set()
+
+        async def abort(self, request_id):
+            aborted.append(request_id)
+
+    task = asyncio.create_task(
+        _image_result_with_disconnect_watch(Request(), ImageClient(), object(), "req")
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    if not disconnect:
+        task.cancel()
+    else:
+        pass
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    assert aborted == ["req"]
+    assert closed.is_set()
 
 
 @pytest.fixture
@@ -720,6 +758,13 @@ def test_image_edit_api_rejects_unsupported_or_invalid_inputs():
         data={"prompt": "edit this", "size": "31x32"},
     )
     assert invalid_size.status_code == 400
+    for n in (0, -1, 11):
+        invalid_n = client.post(
+            "/v1/images/edits",
+            files={"image": image_file},
+            data={"prompt": "edit this", "n": n},
+        )
+        assert invalid_n.status_code == 400
     with_mask = client.post(
         "/v1/images/edits",
         files={"image": image_file, "mask": image_file},
@@ -759,13 +804,13 @@ def test_sensenova_dp_expands_to_distinct_gpu_replicas():
     assert topology.instances("generate") == ("generate@r0", "generate@r1")
 
 
-def test_sensenova_rejects_tp_and_same_gpu_dp():
+def test_sensenova_accepts_tp_and_rejects_same_gpu_dp():
     config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
     tp_config = config.model_dump()
     tp_config["stages"][0]["tp_size"] = 2
     tp_config["stages"][0]["gpu"] = [0, 1]
-    with pytest.raises(ValueError, match="not TP"):
-        SenseNovaU1PipelineConfig.model_validate(tp_config)
+    validated = SenseNovaU1PipelineConfig.model_validate(tp_config)
+    assert validated.stages[0].tp_size == 2
 
     with pytest.raises(ValueError, match="distinct GPU"):
         SenseNovaU1PipelineConfig(

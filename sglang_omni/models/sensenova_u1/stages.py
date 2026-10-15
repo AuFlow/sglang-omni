@@ -34,10 +34,17 @@ from sglang_omni.models.sensenova_u1.sampling import (
     image_guidance_branch_count,
     resolve_cache_dit_defaults,
 )
+from sglang_omni.models.sensenova_u1.tensor_parallel import (
+    apply_tensor_parallel,
+    initialize_tp,
+    validate_tp_device,
+    validate_tp_settings,
+)
 from sglang_omni.models.sensenova_u1.usage import build_image_usage
 from sglang_omni.models.weight_loader import resolve_dtype
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
 from sglang_omni.utils.device import resolve_concrete_device
 
 logger = logging.getLogger(__name__)
@@ -524,11 +531,49 @@ def prepare_cache_dit(
     )
 
 
+def validate_generation_request(payload: StagePayload, model: NEOChatModel) -> None:
+    """Reject invalid TP work before the leader dispatches it to other ranks."""
+    inputs = payload.request.inputs
+    is_edit = isinstance(inputs, dict) and inputs.get("task") == "image_edit"
+    if is_edit:
+        prompt = inputs.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("SenseNova-U1 requires a non-empty image edit prompt")
+        else:
+            pass
+        options = SenseNovaU1ImageEditSampling.from_params(payload.request.params)
+        references = _prepare_reference_images(inputs.get("image_b64"), options)
+        _resolve_edit_output_size(references, options)
+        branch_count = image_guidance_branch_count(
+            options.guidance_scale, options.img_cfg_scale
+        )
+    else:
+        options = _text_to_image_options(payload)
+        branch_count = 2 if options.guidance_scale > 1 else 1
+    controller = model.sensenova_cache_dit
+    enabled = (
+        controller.enabled_by_default
+        if options.enable_cache_dit is None
+        else options.enable_cache_dit
+    )
+    if enabled and branch_count <= 2:
+        controller.validate_request(
+            model.language_model.model,
+            params=options.cache_dit_params,
+            steps=options.num_inference_steps,
+        )
+    else:
+        pass
+
+
 def create_generation_executor(
     model_path: str,
     *,
     device: str | None = None,
     gpu_id: int | None = None,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    nccl_port: int | None = None,
     dtype: str | None = "bfloat16",
     max_batch_size: int = 1,
     max_batch_wait_ms: float = 0,
@@ -542,7 +587,12 @@ def create_generation_executor(
     pin_cpu_memory: bool = False,
 ) -> SimpleScheduler:
     """Load the model once and optionally batch compatible T2I requests."""
+    validate_tp_settings(tp_rank, tp_size, max_batch_size)
     resolved_device = resolve_concrete_device(device, gpu_id)
+    if tp_size > 1:
+        validate_tp_device(resolved_device, nccl_port)
+    else:
+        pass
     offload_config = None
     if dit_layerwise_offload:
         if resolved_device.type != "cuda":
@@ -564,6 +614,12 @@ def create_generation_executor(
     model = AutoModel.from_pretrained(
         model_path, torch_dtype=resolve_dtype(dtype)
     ).eval()
+    tp_group = None
+    if tp_size > 1:
+        tp_group = initialize_tp(resolved_device, tp_rank, tp_size, nccl_port)
+        apply_tensor_parallel(model, tp_rank, tp_size, tp_group)
+    else:
+        pass
     offload = None
     if offload_config is not None:
         offload = SenseNovaLayerwiseOffload(model, resolved_device, offload_config)
@@ -577,7 +633,8 @@ def create_generation_executor(
         default_params=cache_dit_params,
     )
     logger.info(
-        f"SenseNova-U1 loaded on {resolved_device} with dtype={dtype} "
+        f"SenseNova-U1 loaded on {resolved_device} with dtype={dtype}, "
+        f"tp_rank={tp_rank}/{tp_size} "
         f"in {time.perf_counter() - load_started:.2f} seconds"
     )
     if resolved_device.type == "npu":
@@ -608,6 +665,32 @@ def create_generation_executor(
         with offload.request() if offload is not None else nullcontext():
             return generate_images(payloads, model, tokenizer)
 
+    def _shutdown() -> None:
+        try:
+            try:
+                model.sensenova_cache_dit.unmount()
+            finally:
+                if offload is not None:
+                    offload.close()
+                else:
+                    pass
+        finally:
+            if tp_group is not None and torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
+            else:
+                pass
+
+    if tp_size > 1:
+        return TensorParallelScheduler(
+            _generate,
+            validate_request=lambda payload: validate_generation_request(
+                payload, model
+            ),
+            shutdown_callback=_shutdown,
+        )
+    else:
+        pass
+
     return SimpleScheduler(
         _generate,
         batch_compute_fn=_generate_batch if batch_enabled else None,
@@ -616,5 +699,6 @@ def create_generation_executor(
         batch_key_fn=image_generation_batch_key if batch_enabled else None,
         request_cost_fn=image_generation_request_cost if batch_enabled else None,
         max_batch_cost=max_batch_cost if batch_enabled else None,
-        shutdown_callback=offload.close if offload is not None else None,
+        shutdown_callback=_shutdown,
+        shutdown_on_compute_thread=True,
     )

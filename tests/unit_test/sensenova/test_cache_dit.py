@@ -193,6 +193,23 @@ class TestCacheDitLifecycle(unittest.TestCase):
                 self.prepare(params=params)
         self.assertEqual(self.backend.enable_cache.call_count, 2)
 
+    def test_preflight_rejects_invalid_blocks_without_changing_active_cache(
+        self,
+    ) -> None:
+        self.prepare()
+        adapter = self.controller.adapter
+        layers = self.transformer.layers
+        with self.assertRaisesRegex(ValueError, "decoder layer count"):
+            self.controller.validate_request(
+                self.transformer, params={"Fn_compute_blocks": 33}, steps=30
+            )
+        self.assertIs(self.controller.adapter, adapter)
+        self.assertIs(self.transformer.layers, layers)
+        self.backend.disable_cache.assert_not_called()
+        self.backend.refresh_context.assert_not_called()
+        self.controller.validate_request(self.transformer, params=None, steps=30)
+        self.backend.enable_cache.assert_called_once()
+
     def test_disabled_server_defaults_survive_request_enable(self) -> None:
         enabled, params = resolve_cache_dit_defaults(
             False, {"residual_diff_threshold": 0.01}
