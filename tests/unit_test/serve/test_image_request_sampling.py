@@ -6,6 +6,29 @@ from sglang_omni.serve.image_request import resolve_image_generation_params
 from sglang_omni.serve.protocol import ImageGenerationRequest
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"think_mode": True},
+        {"extra_body": {"think_mode": True}},
+        {"extra_json": '{"think_mode": true}'},
+        {"extra_args": {"think_mode": True}},
+        {"extra_params": {"think_mode": True}},
+    ],
+)
+def test_think_mode_is_rejected_before_inference(fields):
+    request = ImageGenerationRequest(prompt="cat", **fields)
+    with pytest.raises(ValueError, match="think_mode is not supported"):
+        resolve_image_generation_params(request)
+
+
+def test_explicit_false_think_mode_overrides_nested_true():
+    request = ImageGenerationRequest(
+        prompt="cat", think_mode=False, extra_body={"think_mode": True}
+    )
+    assert resolve_image_generation_params(request)["think_mode"] is False
+
+
 @pytest.mark.parametrize("n, expected", [(None, 1), (0, 1), (-3, 1), (1, 1), (5, 5), (11, 10)])
 def test_n_is_clamped(n, expected):
     params = resolve_image_generation_params(ImageGenerationRequest(prompt="cat", n=n))

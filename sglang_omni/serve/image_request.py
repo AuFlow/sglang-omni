@@ -68,7 +68,7 @@ def resolve_image_generation_params(request: BaseModel) -> dict[str, Any]:
         value = getattr(request, name)
         if value is not None:
             params[name] = value
-    for name in ("enable_cache_dit", "cache_dit_params"):
+    for name in ("enable_cache_dit", "cache_dit_params", "think_mode"):
         value = image_request_extra_value(request, name)
         if value is not None:
             params[name] = value
