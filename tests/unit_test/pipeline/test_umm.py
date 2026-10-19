@@ -9,7 +9,6 @@ import json
 import pickle
 import threading
 from dataclasses import replace
-from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -26,10 +25,8 @@ from sglang_omni.pipeline.umm import (
     OUTPUT_FACTORY_PATH,
     ROUTE_FN_PATH,
     STREAM_DONE_FN_PATH,
-    UMM_DEADLINE_METADATA_KEY,
     ContextRef,
     Continuation,
-    UMMContext,
     UMMController,
     UMMDispatch,
     UMMLimits,
@@ -42,7 +39,7 @@ from sglang_omni.pipeline.umm import (
     umm_stream_done_targets,
 )
 from sglang_omni.proto import DataAckMessage, DataReadyMessage
-from sglang_omni.proto.request import OmniRequest, RoutedPayloads, StagePayload
+from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.proto.session import SESSION_METADATA_KEY
 from sglang_omni.relay.shm import ShmRelay
 from sglang_omni.scheduling.message import IncomingMessage
@@ -971,68 +968,3 @@ async def test_waiting_controller_reports_its_deadline_through_its_stage(ending)
     assert list(controller.contexts) == ([] if ending == "deadline" else ["other"])
     with pytest.raises(RuntimeError, match="inactive request"):
         controller.advance(reply(dispatched, generate("late")))
-
-
-@pytest.mark.parametrize("metadata_step", ["dispatch", "waiting", "complete"])
-def test_parallel_completion_metadata_and_deadline(
-    metadata_step: Literal["dispatch", "waiting", "complete"],
-) -> None:
-    """Parallel work must retain deadlines and publish metadata only at completion."""
-
-    class CompletionAdapter(ParallelAdapter):
-        def start(self, context: UMMContext) -> UMMStep:
-            step = super().start(context)
-            return replace(
-                step,
-                completion_metadata=(
-                    {"trace": "done"} if metadata_step == "dispatch" else None
-                ),
-            )
-
-        def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
-            return UMMStep(
-                completion_metadata=(
-                    {"trace": "done"}
-                    if phase == "generate" or metadata_step == "waiting"
-                    else None
-                )
-            )
-
-    adapter = CompletionAdapter()
-    controller = UMMController(
-        adapter,
-        limits=UMMLimits(
-            max_dispatches=2,
-            max_outputs=2,
-            max_active=1,
-            max_retained_bytes=1024,
-            timeout_s=60,
-        ),
-        phases={"reason": "reasoner", "generate": "generator"},
-        output_stage="output",
-    )
-    initial_payload = StagePayload("request", OmniRequest("prompt"), None)
-    if metadata_step == "dispatch":
-        with pytest.raises(ValueError, match="completing UMM step"):
-            controller.transition(initial_payload)
-    else:
-        dispatched_payloads = controller.transition(initial_payload)
-        assert isinstance(dispatched_payloads, RoutedPayloads)
-        deadline_monotonic_s = controller.contexts["request"].deadline
-        assert all(
-            payload.request.metadata[UMM_DEADLINE_METADATA_KEY] == deadline_monotonic_s
-            for payload in dispatched_payloads.payloads.values()
-        )
-        reason_payload = dispatched_payloads.payloads["reasoner"]
-        if metadata_step == "waiting":
-            with pytest.raises(ValueError, match="completing UMM step"):
-                controller.transition(reason_payload)
-        else:
-            assert controller.transition(reason_payload) is None
-            completion_payload = controller.transition(
-                dispatched_payloads.payloads["generator"]
-            )
-            assert isinstance(completion_payload, StagePayload)
-            assert completion_payload.data["metadata"] == {"trace": "done"}
-    assert adapter.closed == ["completed" if metadata_step == "complete" else "failed"]
-    assert not controller.contexts

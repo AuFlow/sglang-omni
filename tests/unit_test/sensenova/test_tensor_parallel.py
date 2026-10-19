@@ -16,17 +16,18 @@ from torch import nn
 
 from sglang_omni.models.sensenova_u1.cancellation import (
     GenerationScope,
+    SenseNovaCancelledError,
     generation_checkpoint,
 )
 from sglang_omni.models.sensenova_u1.tensor_parallel import (
+    SenseNovaTensorParallelScheduler,
     apply_tensor_parallel,
     initialize_tp,
     synchronize_tp_noise,
     validate_tp_settings,
 )
 from sglang_omni.proto.request import OmniRequest, StagePayload
-from sglang_omni.scheduling.message import IncomingMessage, RequestCancelledError
-from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
+from sglang_omni.scheduling.message import IncomingMessage
 
 
 def make_model():
@@ -251,14 +252,14 @@ def cancel_and_resume_generation(rank: int, rendezvous: str) -> None:
                 generation_checkpoint()
                 return payload
 
-        scheduler = TensorParallelScheduler(compute, cooperative_cancellation=True)
+        scheduler = SenseNovaTensorParallelScheduler(compute)
         cancelled = StagePayload("cancelled", OmniRequest("prompt"), None)
         scheduler.run_single(
             IncomingMessage("cancelled", "new_request", cancelled), execution_loop
         )
         failure = scheduler.outbox.get_nowait()
         assert failure.type == "error"
-        assert isinstance(failure.data, RequestCancelledError)
+        assert isinstance(failure.data, SenseNovaCancelledError)
         assert scheduler.compute_error is None
         subsequent = StagePayload("next", OmniRequest("prompt"), None)
         scheduler.run_single(

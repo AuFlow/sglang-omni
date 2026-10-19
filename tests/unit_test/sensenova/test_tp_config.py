@@ -19,16 +19,17 @@ from sglang_omni.pipeline.replicas import expand_replica_stages
 
 def make_config(size=2, batch=1):
     data = SenseNovaU1PipelineConfig(model_path="/model/sensenova").model_dump()
-    data["stages"][0]["tp_size"] = size
-    data["stages"][0]["gpu"] = list(range(size))
-    data["stages"][0]["factory"]["max_batch_size"] = batch
+    generate = next(stage for stage in data["stages"] if stage["name"] == "generate")
+    generate["tp_size"] = size
+    generate["gpu"] = list(range(size))
+    generate["factory"]["max_batch_size"] = batch
     return data
 
 
 @pytest.mark.parametrize("size", [1, 2, 4, 8])
 def test_supported_tp_sizes(size):
     config = SenseNovaU1PipelineConfig.model_validate(make_config(size))
-    assert config.stages[0].tp_size == size
+    assert config.stage_named("generate").tp_size == size
 
 
 def test_tp_rejects_unsupported_size_and_dynamic_batching():
@@ -49,7 +50,11 @@ def test_dp_tp_expands_into_independent_gpu_groups():
     config = SenseNovaU1PipelineConfig.model_validate(data)
     plan, stages = compile_logical_processes(config)
     expanded, _ = expand_replica_stages(stages, plan)
-    assert [(stage.name, stage.tp_size, stage.gpu) for stage in expanded] == [
+    assert [
+        (stage.name, stage.tp_size, stage.gpu)
+        for stage in expanded
+        if stage.name.startswith("generate")
+    ] == [
         ("generate@r0", 2, [0, 1]),
         ("generate@r1", 2, [2, 3]),
     ]
@@ -72,7 +77,29 @@ def test_tp_example_make_config(name):
     config = ConfigManager.from_file(str(path)).config
     plan, stages = compile_logical_processes(config)
     expanded, _ = expand_replica_stages(stages, plan)
-    assert all(stage.tp_size == 2 for stage in expanded)
+    assert all(
+        stage.tp_size == 2 for stage in expanded if stage.name.startswith("generate")
+    )
+
+
+def test_dp2_example_makes_independent_replicas():
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "examples"
+        / "configs"
+        / "sensenova_u1_dp2.yaml"
+    )
+    config = ConfigManager.from_file(str(path)).config
+    plan, stages = compile_logical_processes(config)
+    expanded, _ = expand_replica_stages(stages, plan)
+    assert [
+        (stage.name, stage.tp_size, stage.gpu)
+        for stage in expanded
+        if stage.name.startswith("generate")
+    ] == [
+        ("generate@r0", 1, 0),
+        ("generate@r1", 1, 1),
+    ]
 
 
 def test_dotted_cli_enables_tp_and_rejects_batching():
@@ -80,7 +107,7 @@ def test_dotted_cli_enables_tp_and_rejects_batching():
     config = manager.merge_config(
         [("generate.tp_size", "2"), ("generate.gpu", "[0, 1]")]
     )
-    assert config.stages[0].tp_size == 2
+    assert config.stage_named("generate").tp_size == 2
     with pytest.raises(ValueError, match="max_batch_size=1"):
         ConfigManager(config).merge_config([("generate.factory.max_batch_size", "2")])
 
@@ -96,7 +123,7 @@ def test_generation_defaults_reach_factory(
     expected_offload: bool,
 ) -> None:
     config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
-    stage = config.stages[0]
+    stage = config.stage_named("generate")
     default_kwargs = {
         **resolve_stage_factory_kwargs(stage, config),
         **resolve_stage_typed_kwargs(stage),
@@ -123,7 +150,7 @@ def test_offload_defaults_reach_factory(use_none: bool) -> None:
         "pin_cpu_memory": False,
     }
     config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
-    stage = config.stages[0]
+    stage = config.stage_named("generate")
     if use_none:
         stage.factory = SenseNovaGenerationFactoryArgs.model_validate(
             dict.fromkeys(expected)
@@ -145,7 +172,7 @@ def test_offload_overrides_reach_factory() -> None:
         "pin_cpu_memory": True,
     }
     config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
-    stage = config.stages[0]
+    stage = config.stage_named("generate")
     stage.factory = SenseNovaGenerationFactoryArgs.model_validate(overrides)
     resolved = {
         **resolve_stage_factory_kwargs(stage, config),

@@ -191,7 +191,7 @@ def test_engine_kv_cache_bytes_rejects_max_total_tokens() -> None:
 
 class AuthorConfiguredSenseNova(SenseNovaU1PipelineConfig):
     def stage_factory_kwargs(self, stage_name: str) -> dict[str, str | int | bool]:
-        # note (Codex): The pipeline hook requires a stage name for this single-stage model.
+        # note (Codex): The pipeline hook requires a stage name for this model.
         return {
             "dtype": "float16",
             "dit_layerwise_offload": True,
@@ -224,7 +224,7 @@ def test_sensenova_factory_override_precedence(
     round_trip: bool,
 ) -> None:
     config = AuthorConfiguredSenseNova(model_path="model")
-    stage = config.stages[0]
+    stage = config.stage_named("generate")
     if selection == "omitted":
         stage.factory = SenseNovaGenerationFactoryArgs()
     elif selection == "none":
@@ -237,7 +237,7 @@ def test_sensenova_factory_override_precedence(
         )
     if round_trip:
         config = AuthorConfiguredSenseNova.model_validate(config.model_dump())
-        stage = config.stages[0]
+        stage = config.stage_named("generate")
     else:
         pass
     if replica:
@@ -261,7 +261,7 @@ def test_sensenova_factory_override_precedence(
 @pytest.mark.parametrize("use_none", [False, True])
 def test_sensenova_factory_fallbacks_without_author_overrides(use_none: bool) -> None:
     config = SenseNovaU1PipelineConfig(model_path="model")
-    stage = config.stages[0]
+    stage = config.stage_named("generate")
     expected = {
         "dtype": "bfloat16",
         "dit_layerwise_offload": False,

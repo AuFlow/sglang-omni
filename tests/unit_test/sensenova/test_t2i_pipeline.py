@@ -775,7 +775,9 @@ def test_image_edit_api_rejects_unsupported_or_invalid_inputs():
 def test_config_registers_checkpoint_architecture(tmp_path):
     assert SenseNovaU1PipelineConfig.architecture == "NEOChatModel"
     config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
-    assert config.stages[0].terminal
+    assert config.resolved_entry_stage == "orchestrator"
+    assert not config.stage_named("generate").terminal
+    assert config.stage_named("output").terminal
     factory = FactoryArgs(max_batch_size=2, max_batch_cost=41943040)
     assert factory.max_batch_cost == 41943040
     assert factory.model_extra in (None, {})
@@ -796,7 +798,11 @@ def test_sensenova_dp_expands_to_distinct_gpu_replicas():
     plan, stages = compile_logical_processes(config)
     expanded, topology = expand_replica_stages(stages, plan)
 
-    assert [(stage.name, stage.gpu) for stage in expanded] == [
+    assert [
+        (stage.name, stage.gpu)
+        for stage in expanded
+        if stage.name.startswith("generate")
+    ] == [
         ("generate@r0", 0),
         ("generate@r1", 1),
     ]
@@ -806,10 +812,13 @@ def test_sensenova_dp_expands_to_distinct_gpu_replicas():
 def test_sensenova_accepts_tp_and_rejects_same_gpu_dp():
     config = SenseNovaU1PipelineConfig(model_path="/model/sensenova")
     tp_config = config.model_dump()
-    tp_config["stages"][0]["tp_size"] = 2
-    tp_config["stages"][0]["gpu"] = [0, 1]
+    generate_config = next(
+        stage for stage in tp_config["stages"] if stage["name"] == "generate"
+    )
+    generate_config["tp_size"] = 2
+    generate_config["gpu"] = [0, 1]
     validated = SenseNovaU1PipelineConfig.model_validate(tp_config)
-    assert validated.stages[0].tp_size == 2
+    assert validated.stage_named("generate").tp_size == 2
 
     with pytest.raises(ValueError, match="distinct GPU"):
         SenseNovaU1PipelineConfig(

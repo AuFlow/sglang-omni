@@ -19,7 +19,9 @@ from sglang_omni.config.runtime import (
     resolve_stage_typed_kwargs,
 )
 from sglang_omni.models.sensenova_u1.cancellation import (
+    SENSENOVA_DEADLINE_METADATA_KEY,
     GenerationScope,
+    SenseNovaCancelledError,
     generation_checkpoint,
 )
 from sglang_omni.models.sensenova_u1.image_processing import prepare_reference_images
@@ -27,15 +29,11 @@ from sglang_omni.models.sensenova_u1.sampling import SenseNovaU1ImageEditSamplin
 from sglang_omni.models.sensenova_u1.umm import SenseNovaUMMAdapter
 from sglang_omni.models.sensenova_u1.umm_config import SenseNovaU1UMMPipelineConfig
 from sglang_omni.pipeline.umm import (
-    UMM_DEADLINE_METADATA_KEY,
-    UMMContext,
     UMMController,
     UMMRequestError,
-    UMMStep,
     create_umm_controller,
 )
 from sglang_omni.proto.request import OmniRequest, StagePayload
-from sglang_omni.scheduling.message import RequestCancelledError
 
 pytest_plugins = ["tests.unit_test.fixtures.sensenova_umm"]
 
@@ -61,22 +59,42 @@ def test_outputs_and_usage_survive_controller_completion(
     assert result is not None
     completion = Client.default_result_builder("request", result.data)
     assert isinstance(completion, UMMGenerateChunk)
-    assert completion.image_usage == {"input_tokens": 3, "total_tokens": 3}
+    if streaming:
+        assert completion.image_usage is None
+        assert completion.stage_name is None
+    else:
+        assert completion.image_usage == {"input_tokens": 3, "total_tokens": 3}
+        assert completion.stage_name == "generate"
     assert completion.segments is not None
     assert [segment.segment_index for segment in completion.segments] == list(
-        range(image_count)
+        range(image_count + 1)
     )
+    assert [segment.kind for segment in completion.segments] == [
+        *(["image"] * image_count),
+        "usage",
+    ]
+    image_segments = [
+        segment for segment in completion.segments if segment.kind == "image"
+    ]
     if streaming:
-        segments = [controller.outbox.get_nowait().data for _ in range(image_count)]
+        segments = [controller.outbox.get_nowait().data for _ in range(image_count + 1)]
         assert all(segment.data is None for segment in completion.segments)
         assert [
             InlineImage.model_validate(segment["data"]).encoded_image()
             for segment in segments
+            if segment["kind"] == "image"
         ] == encoded_images[:image_count]
+        usage_segment = next(
+            segment for segment in segments if segment["kind"] == "usage"
+        )
+        assert usage_segment["data"]["image_usage"] == {
+            "input_tokens": 3,
+            "total_tokens": 3,
+        }
     else:
         assert [
             InlineImage.model_validate(segment.data).encoded_image()
-            for segment in completion.segments
+            for segment in image_segments
         ] == encoded_images[:image_count]
     assert not controller.contexts
     assert not controller.adapter.executions
@@ -96,34 +114,19 @@ def test_bad_result_releases_adapter_state(
     assert not controller.adapter.executions
 
 
-@pytest.mark.parametrize("oversized", [False, True])
-def test_completion_metadata_is_delivered_within_controller_budget(
-    controller: UMMController,
-    encoded_image: str,
-    oversized: bool,
-    monkeypatch: pytest.MonkeyPatch,
+def test_usage_segment_counts_toward_output_budget(
+    controller: UMMController, encoded_image: str
 ) -> None:
+    controller.limits = replace(controller.limits, max_outputs=1)
     phase = controller.transition(StagePayload("request", OmniRequest("prompt"), None))
     assert phase is not None
-    controller.limits = replace(controller.limits, max_retained_bytes=1024)
-    phase.data = {"modality": "image", "image_b64": encoded_image}
-    metadata = {"trace": "x" * (1024 if oversized else 1)}
-    advance_adapter = controller.adapter.advance
-
-    def complete(context: UMMContext, phase: str, result: object) -> UMMStep:
-        return replace(
-            advance_adapter(context, phase, result), completion_metadata=metadata
-        )
-
-    monkeypatch.setattr(controller.adapter, "advance", complete)
-    if oversized:
-        with pytest.raises(RuntimeError, match="max_retained_bytes"):
-            controller.transition(phase)
-        assert controller.outbox.empty()
-    else:
-        completion = controller.transition(phase)
-        assert completion is not None
-        assert completion.data["metadata"] == metadata
+    phase.data = {
+        "modality": "image",
+        "image_b64": encoded_image,
+        "image_usage": {"input_tokens": 3, "total_tokens": 3},
+    }
+    with pytest.raises(RuntimeError, match="max_outputs"):
+        controller.transition(phase)
     assert not controller.adapter.executions
 
 
@@ -189,7 +192,7 @@ def test_batch_cancellation_preserves_live_members_and_clears_scope() -> None:
     ):
         generation_checkpoint()
         cancelled_requests.add("second")
-        with pytest.raises(RequestCancelledError):
+        with pytest.raises(SenseNovaCancelledError):
             generation_checkpoint()
     generation_checkpoint()
     with GenerationScope(
@@ -204,13 +207,13 @@ def test_batch_cancellation_preserves_live_members_and_clears_scope() -> None:
 def test_expired_phase_stops_at_checkpoint() -> None:
     payload = StagePayload(
         "expired",
-        OmniRequest("prompt", metadata={UMM_DEADLINE_METADATA_KEY: 0.0}),
+        OmniRequest("prompt", metadata={SENSENOVA_DEADLINE_METADATA_KEY: 0.0}),
         None,
     )
     with GenerationScope(
         [payload], lambda request_id: False, torch.device("cpu"), None
     ):
-        with pytest.raises(RequestCancelledError):
+        with pytest.raises(SenseNovaCancelledError):
             generation_checkpoint()
 
 
@@ -279,7 +282,7 @@ def test_loaded_configuration_constructs_controller_and_dispatches() -> None:
     controller = create_umm_controller("unused", **arguments)
     phase = controller.transition(StagePayload("request", OmniRequest("prompt"), None))
     assert phase is not None
-    assert phase.request.metadata[UMM_DEADLINE_METADATA_KEY] > 0
+    assert phase.request.metadata[SENSENOVA_DEADLINE_METADATA_KEY] > 0
     controller.abort("request")
     assert not controller.adapter.executions
 

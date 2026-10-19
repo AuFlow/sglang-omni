@@ -7,9 +7,7 @@ import io
 import pytest
 from PIL import Image
 
-from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.models.sensenova_u1.umm import SenseNovaUMMAdapter
-from sglang_omni.models.sensenova_u1.umm_config import SenseNovaU1UMMPipelineConfig
 from sglang_omni.pipeline.umm import UMMController, UMMLimits
 
 
@@ -30,15 +28,11 @@ def encoded_image(encoded_images: list[str]) -> str:
 
 @pytest.fixture
 def controller() -> UMMController:
-    configuration = SenseNovaU1UMMPipelineConfig(model_path="unused")
-    controller_options = resolve_stage_typed_kwargs(
-        configuration.stage_named("orchestrator")
-    )
     return UMMController(
-        SenseNovaUMMAdapter("unused", **controller_options["adapter_options"]),
+        SenseNovaUMMAdapter("unused"),
         limits=UMMLimits(
             max_dispatches=1,
-            max_outputs=10,
+            max_outputs=11,
             max_active=2,
             max_retained_bytes=256 * 1024 * 1024,
             timeout_s=60,

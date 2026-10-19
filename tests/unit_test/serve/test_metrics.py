@@ -8,7 +8,12 @@ import pytest
 from starlette.types import Message, Receive, Scope, Send
 
 import sglang_omni.serve.metrics_registry as metrics_registry
-from sglang_omni.client.types import GenerateChunk, UsageInfo
+from sglang_omni.client.types import (
+    GenerateChunk,
+    UMMGenerateChunk,
+    UMMSegment,
+    UsageInfo,
+)
 from sglang_omni.scheduling.metrics_snapshot import MetricsAdminResponse
 from sglang_omni.serve.metrics import MetricsMiddleware
 from sglang_omni.serve.request_metrics import RequestMetrics
@@ -469,6 +474,38 @@ def test_modality_counts_use_waveform_and_final_image_list(aborted: bool) -> Non
         "sglang_omni:generated_images_total",
         {"model_name": "test", "stage": "generate"},
     ) == (None if aborted else 2)
+
+
+def test_umm_image_segments_count_toward_generated_images() -> None:
+    metrics = RequestMetrics("test")
+
+    async def source() -> AsyncGenerator[GenerateChunk, None]:
+        yield UMMGenerateChunk(
+            request_id="r",
+            stage_name="generate",
+            segments=[
+                UMMSegment("execution", 0, "image", {"kind": "image"}),
+                UMMSegment("execution", 1, "image", {"kind": "image"}),
+                UMMSegment(
+                    "execution",
+                    2,
+                    "usage",
+                    {"image_usage": {"input_tokens": 3, "total_tokens": 3}},
+                ),
+            ],
+        )
+
+    async def run() -> list[GenerateChunk]:
+        return [item async for item in metrics.generate(source(), False)]
+
+    asyncio.run(run())
+    assert (
+        metrics.registry.get_sample_value(
+            "sglang_omni:generated_images_total",
+            {"model_name": "test", "stage": "generate"},
+        )
+        == 2
+    )
 
 
 def test_backend_export_preserves_types_and_excludes_duplicate_owned_names() -> None:
