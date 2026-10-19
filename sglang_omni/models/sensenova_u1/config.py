@@ -92,3 +92,7 @@ class SenseNovaU1PipelineConfig(PipelineConfig):
 
 
 EntryClass = SenseNovaU1PipelineConfig
+
+Variants = {
+    "umm": "sglang_omni.models.sensenova_u1.umm_config:SenseNovaU1UMMPipelineConfig",
+}

@@ -20,6 +20,7 @@ from sglang_omni.client.audio import (
     encode_audio,
     to_numpy,
 )
+from sglang_omni.client.image_media import parse_image_usage
 from sglang_omni.client.types import (
     UNKNOWN_FINISH_REASON,
     AbortLevel,
@@ -1129,6 +1130,7 @@ def umm_result_chunk(request_id: str, result: dict[str, object]) -> GenerateChun
         finish_reason=finish_reason if isinstance(finish_reason, str) else "stop",
         model_finish_reason="",
         modality="mixed",
+        image_usage=parse_image_usage(result.get("image_usage")),
         segments=segments,
     )
 

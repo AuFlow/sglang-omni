@@ -79,6 +79,7 @@ from sglang_omni.client.audio import (
     encode_pcm,
     select_audio_delta,
 )
+from sglang_omni.client.image_media import InlineImage
 from sglang_omni.client.types import (
     UNKNOWN_FINISH_REASON,
     GenerateChunk,
@@ -1567,7 +1568,9 @@ def register_image_generations(app: FastAPI) -> None:
             return build_image_response(images, chunk.image_usage)
         except Exception as exc:
             logger.exception(f"Image generation failed for request {request_id}")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=generation_error_status_code(exc), detail=str(exc)
+            ) from exc
 
 
 def register_image_edits(app: FastAPI) -> None:
@@ -1709,7 +1712,9 @@ def register_image_edits(app: FastAPI) -> None:
                 data.append(chunk.image_b64)
         except Exception as exc:
             logger.exception(f"Image edit failed for request {parent_request_id}")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=generation_error_status_code(exc), detail=str(exc)
+            ) from exc
         if len(data) != num_outputs:
             raise HTTPException(
                 status_code=500, detail="SenseNova-U1 returned no result"
@@ -1736,6 +1741,16 @@ async def image_result_with_disconnect_watch(
                 pass
         if result is None:
             raise RuntimeError("SenseNova-U1 returned no result")
+        else:
+            pass
+        if isinstance(result, UMMGenerateChunk):
+            images = [
+                InlineImage.model_validate(segment.data).encoded_image()
+                for segment in result.segments or []
+                if segment.kind == "image"
+            ]
+            result.images_b64 = images
+            result.image_b64 = images[0] if images else None
         else:
             pass
         return result

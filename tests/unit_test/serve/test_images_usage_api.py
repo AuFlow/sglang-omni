@@ -6,10 +6,15 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from pydantic import JsonValue
 
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateChunk, GenerateRequest
+from sglang_omni.pipeline.umm import UMMController
+from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.serve.openai_api import create_app
+
+pytest_plugins = ["tests.unit_test.fixtures.sensenova_umm"]
 
 
 @pytest.mark.parametrize("editing", [False, True])
@@ -82,3 +87,46 @@ def test_images_usage_and_complete_result_consumption(
         }
         assert result["usage"]["image_count"] == outputs
         assert (result["usage"]["width"], result["usage"]["height"]) == (64, 32)
+
+
+@pytest.mark.parametrize("editing", [False, True])
+def test_images_endpoints_consume_real_umm_results(
+    controller: UMMController, encoded_image: str, editing: bool
+) -> None:
+    class GenerationCoordinator:
+        async def submit(self, request_id: str, request: OmniRequest) -> JsonValue:
+            phase = controller.transition(StagePayload(request_id, request, None))
+            assert phase is not None
+            phase.data = {
+                "modality": "image",
+                "images_b64": [encoded_image] * request.params.get("n", 1),
+                "image_usage": {"input_tokens": 3, "total_tokens": 3},
+            }
+            completion = controller.transition(phase)
+            assert completion is not None
+            return completion.data
+
+    application = create_app(
+        Client(GenerationCoordinator()),
+        architectures=["NEOChatModel"],
+        interleaved_output=True,
+    )
+    with TestClient(application) as client:
+        if editing:
+            response = client.post(
+                "/v1/images/edits",
+                data={"prompt": "a mug", "size": "64x32", "n": 2},
+                files={
+                    "image": ("input.png", base64.b64decode(encoded_image), "image/png")
+                },
+            )
+        else:
+            response = client.post(
+                "/v1/images/generations",
+                json={"prompt": "a mug", "size": "64x32", "n": 2},
+            )
+    assert response.status_code == 200, response.text
+    assert [image["b64_json"] for image in response.json()["data"]] == [
+        encoded_image
+    ] * 2
+    assert response.json()["usage"]["input_tokens"] == 3
