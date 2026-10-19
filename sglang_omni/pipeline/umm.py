@@ -45,6 +45,7 @@ CONTINUATION_METADATA_KEY = "omni_continuation"
 # A phase result reports context it produced under this data key, and the
 # consuming phase finds it under this request metadata key.
 CONTEXT_KEY = "umm_context"
+UMM_DEADLINE_METADATA_KEY = "umm_deadline_monotonic_s"
 CONTROLLER_FACTORY_PATH = f"{__name__}.create_umm_controller"
 OUTPUT_FACTORY_PATH = f"{__name__}.create_umm_output_stage"
 ROUTE_FN_PATH = f"{__name__}.route_umm"
@@ -282,7 +283,10 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         return True
 
     def forget(self, request_id: str) -> None:
-        self.release(request_id, "aborted")
+        with self.lock:
+            context = self.contexts.get(request_id)
+            expired = context is not None and self.clock() >= context.deadline
+        self.release(request_id, "expired" if expired else "aborted")
 
     def forget_all(self) -> None:
         with self.lock:
@@ -619,7 +623,11 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         else:
             pass
         context.remaining_dispatches -= 1
-        metadata = {**step.request.metadata, CONTINUATION_METADATA_KEY: continuation}
+        metadata = {
+            **step.request.metadata,
+            CONTINUATION_METADATA_KEY: continuation,
+            UMM_DEADLINE_METADATA_KEY: context.deadline,
+        }
         if step.context is not None:
             metadata[CONTEXT_KEY] = step.context
         else:
@@ -697,6 +705,7 @@ def create_umm_controller(
     max_retained_bytes: int,
     timeout_s: float,
     stage_name: str = "orchestrator",
+    adapter_options: dict[str, JSONValue] | None = None,
 ) -> UMMController:
     """Build the controller around the adapter of the model being served.
 
@@ -709,7 +718,7 @@ def create_umm_controller(
         raise TypeError(f"UMM adapter factory {adapter!r} is not callable")
     else:
         pass
-    model_adapter = adapter_factory(model_path)
+    model_adapter = adapter_factory(model_path, **(adapter_options or {}))
     if not isinstance(model_adapter, UMMAdapter):
         raise TypeError(f"{adapter!r} did not return a UMMAdapter")
     else:

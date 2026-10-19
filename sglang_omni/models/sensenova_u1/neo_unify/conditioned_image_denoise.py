@@ -7,6 +7,7 @@ from typing import Literal
 import torch.utils.checkpoint
 from transformers.cache_utils import DynamicCache
 
+from sglang_omni.models.sensenova_u1.cancellation import generation_checkpoint
 from sglang_omni.models.sensenova_u1.neo_unify.flash_cache import (
     clear_flash_kv_cache,
     prepare_i2i_flash_kv_cache,
@@ -164,137 +165,144 @@ def conditioned_image_denoise(
     else:
         pass
 
-    for step_i in range(num_steps):
-        t = timesteps[step_i]
-        t_next = timesteps[step_i + 1]
-        use_cfg = cfg_active[step_i]
+    try:
+        for step_i in range(num_steps):
+            generation_checkpoint()
+            t = timesteps[step_i]
+            t_next = timesteps[step_i + 1]
+            use_cfg = cfg_active[step_i]
 
-        z = self.patchify(image_prediction, self.patch_size * merge_size)
-        image_input = self.patchify(
-            image_prediction, self.patch_size, channel_first=True
-        )
-        image_embeds = self.extract_feature(
-            image_input.view(batch_size * grid_h * grid_w, -1),
-            gen_model=True,
-            grid_hw=grid_hw,
-        ).view(batch_size, token_h * token_w, -1)
-        if denoise_embeddings is not None:
-            timestep_embeddings = denoise_embeddings[step_i].view(1, 1, -1)
-        else:
-            t_expanded = t.expand(batch_size * token_h * token_w)
-            timestep_embeddings = self.fm_modules["timestep_embedder"](t_expanded).view(
-                batch_size, token_h * token_w, -1
+            z = self.patchify(image_prediction, self.patch_size * merge_size)
+            image_input = self.patchify(
+                image_prediction, self.patch_size, channel_first=True
             )
-            if self.add_noise_scale_embedding:
-                noise_scale_tensor = torch.full_like(
-                    t_expanded, noise_scale / self.noise_scale_max_value
-                )
-                timestep_embeddings += self.fm_modules["noise_scale_embedder"](
-                    noise_scale_tensor
+            image_embeds = self.extract_feature(
+                image_input.view(batch_size * grid_h * grid_w, -1),
+                gen_model=True,
+                grid_hw=grid_hw,
+            ).view(batch_size, token_h * token_w, -1)
+            if denoise_embeddings is not None:
+                timestep_embeddings = denoise_embeddings[step_i].view(1, 1, -1)
+            else:
+                t_expanded = t.expand(batch_size * token_h * token_w)
+                timestep_embeddings = self.fm_modules["timestep_embedder"](
+                    t_expanded
                 ).view(batch_size, token_h * token_w, -1)
+                if self.add_noise_scale_embedding:
+                    noise_scale_tensor = torch.full_like(
+                        t_expanded, noise_scale / self.noise_scale_max_value
+                    )
+                    timestep_embeddings += self.fm_modules["noise_scale_embedder"](
+                        noise_scale_tensor
+                    ).view(batch_size, token_h * token_w, -1)
+                else:
+                    pass
+            image_embeds = image_embeds + timestep_embeddings
+
+            out_cond = self.t2i_predict_v(
+                image_embeds,
+                indexes_image_condition,
+                attention_mask_condition,
+                past_key_values_condition,
+                t,
+                z,
+                image_token_num=token_h * token_w,
+                timestep_embeddings=timestep_embeddings,
+                image_size=image_size,
+            )
+
+            if not use_cfg:
+                v_pred = out_cond
+            elif cfg_scale == 1 and img_cfg_scale == 1:
+                v_pred = out_cond
+            elif img_cfg_scale == 1:
+                out_img_cond = self.t2i_predict_v(
+                    image_embeds,
+                    indexes_image_img_condition,
+                    attention_mask_img_condition,
+                    past_key_values_img_condition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                v_pred = out_img_cond + cfg_scale * (out_cond - out_img_cond)
+            elif cfg_scale == img_cfg_scale:
+                out_uncond = self.t2i_predict_v(
+                    image_embeds,
+                    indexes_image_uncondition,
+                    attention_mask_uncondition,
+                    past_key_values_uncondition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                v_pred = out_uncond + cfg_scale * (out_cond - out_uncond)
+            else:
+                out_img_cond = self.t2i_predict_v(
+                    image_embeds,
+                    indexes_image_img_condition,
+                    attention_mask_img_condition,
+                    past_key_values_img_condition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                out_uncond = self.t2i_predict_v(
+                    image_embeds,
+                    indexes_image_uncondition,
+                    attention_mask_uncondition,
+                    past_key_values_uncondition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                v_pred = (
+                    out_uncond
+                    + cfg_scale * (out_cond - out_img_cond)
+                    + img_cfg_scale * (out_img_cond - out_uncond)
+                )
+            if (cfg_scale > 1 or img_cfg_scale > 1) and use_cfg:
+                if cfg_norm == "global":
+                    norm_v_condition = torch.norm(out_cond, dim=(1, 2), keepdim=True)
+                    norm_v_cfg = torch.norm(v_pred, dim=(1, 2), keepdim=True)
+                    scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(
+                        min=0, max=1.0
+                    )
+                    v_pred = v_pred * scale
+                elif cfg_norm == "channel":
+                    norm_v_condition = torch.norm(out_cond, dim=-1, keepdim=True)
+                    norm_v_cfg = torch.norm(v_pred, dim=-1, keepdim=True)
+                    scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(
+                        min=0, max=1.0
+                    )
+                    v_pred = v_pred * scale
+                else:
+                    pass
             else:
                 pass
-        image_embeds = image_embeds + timestep_embeddings
 
-        out_cond = self.t2i_predict_v(
-            image_embeds,
-            indexes_image_condition,
-            attention_mask_condition,
-            past_key_values_condition,
-            t,
-            z,
-            image_token_num=token_h * token_w,
-            timestep_embeddings=timestep_embeddings,
-            image_size=image_size,
-        )
+            z = z + (t_next - t) * v_pred
+            image_prediction = self.unpatchify(
+                z, self.patch_size * merge_size, image_size[1], image_size[0]
+            )
 
-        if not use_cfg:
-            v_pred = out_cond
-        elif cfg_scale == 1 and img_cfg_scale == 1:
-            v_pred = out_cond
-        elif img_cfg_scale == 1:
-            out_img_cond = self.t2i_predict_v(
-                image_embeds,
-                indexes_image_img_condition,
-                attention_mask_img_condition,
-                past_key_values_img_condition,
-                t,
-                z,
-                image_token_num=token_h * token_w,
-                timestep_embeddings=timestep_embeddings,
-                image_size=image_size,
-            )
-            v_pred = out_img_cond + cfg_scale * (out_cond - out_img_cond)
-        elif cfg_scale == img_cfg_scale:
-            out_uncond = self.t2i_predict_v(
-                image_embeds,
-                indexes_image_uncondition,
-                attention_mask_uncondition,
-                past_key_values_uncondition,
-                t,
-                z,
-                image_token_num=token_h * token_w,
-                timestep_embeddings=timestep_embeddings,
-                image_size=image_size,
-            )
-            v_pred = out_uncond + cfg_scale * (out_cond - out_uncond)
-        else:
-            out_img_cond = self.t2i_predict_v(
-                image_embeds,
-                indexes_image_img_condition,
-                attention_mask_img_condition,
-                past_key_values_img_condition,
-                t,
-                z,
-                image_token_num=token_h * token_w,
-                timestep_embeddings=timestep_embeddings,
-                image_size=image_size,
-            )
-            out_uncond = self.t2i_predict_v(
-                image_embeds,
-                indexes_image_uncondition,
-                attention_mask_uncondition,
-                past_key_values_uncondition,
-                t,
-                z,
-                image_token_num=token_h * token_w,
-                timestep_embeddings=timestep_embeddings,
-                image_size=image_size,
-            )
-            v_pred = (
-                out_uncond
-                + cfg_scale * (out_cond - out_img_cond)
-                + img_cfg_scale * (out_img_cond - out_uncond)
-            )
-        if (cfg_scale > 1 or img_cfg_scale > 1) and use_cfg:
-            if cfg_norm == "global":
-                norm_v_condition = torch.norm(out_cond, dim=(1, 2), keepdim=True)
-                norm_v_cfg = torch.norm(v_pred, dim=(1, 2), keepdim=True)
-                scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
-                v_pred = v_pred * scale
-            elif cfg_norm == "channel":
-                norm_v_condition = torch.norm(out_cond, dim=-1, keepdim=True)
-                norm_v_cfg = torch.norm(v_pred, dim=-1, keepdim=True)
-                scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
-                v_pred = v_pred * scale
-            else:
-                pass
+    finally:
+        clear_flash_kv_cache(past_key_values_condition)
+        if past_key_values_img_condition is not None:
+            clear_flash_kv_cache(past_key_values_img_condition)
         else:
             pass
-
-        z = z + (t_next - t) * v_pred
-        image_prediction = self.unpatchify(
-            z, self.patch_size * merge_size, image_size[1], image_size[0]
-        )
-
-    clear_flash_kv_cache(past_key_values_condition)
-    if past_key_values_img_condition is not None:
-        clear_flash_kv_cache(past_key_values_img_condition)
-    else:
-        pass
-    if past_key_values_uncondition is not None:
-        clear_flash_kv_cache(past_key_values_uncondition)
-    else:
-        pass
+        if past_key_values_uncondition is not None:
+            clear_flash_kv_cache(past_key_values_uncondition)
+        else:
+            pass
 
     return image_prediction

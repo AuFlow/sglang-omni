@@ -4,13 +4,23 @@
 from dataclasses import replace
 
 import pytest
+import torch
 
 from sglang_omni.client.client import Client
 from sglang_omni.client.image_media import InlineImage
 from sglang_omni.client.types import UMMGenerateChunk
+from sglang_omni.models.sensenova_u1.cancellation import (
+    GenerationScope,
+    generation_checkpoint,
+)
 from sglang_omni.models.sensenova_u1.umm_config import SenseNovaU1UMMPipelineConfig
-from sglang_omni.pipeline.umm import UMMController, UMMRequestError
+from sglang_omni.pipeline.umm import (
+    UMM_DEADLINE_METADATA_KEY,
+    UMMController,
+    UMMRequestError,
+)
 from sglang_omni.proto.request import OmniRequest, StagePayload
+from sglang_omni.scheduling.message import RequestCancelledError
 
 pytest_plugins = ["tests.unit_test.fixtures.sensenova_umm"]
 
@@ -106,3 +116,67 @@ def test_umm_config_retains_tp_constraints() -> None:
     configuration.stage_named("generate").gpu = [0, 1, 2]
     with pytest.raises(ValueError, match="tp_size"):
         SenseNovaU1UMMPipelineConfig.model_validate(configuration.model_dump())
+
+
+@pytest.mark.parametrize(
+    "parameters, message",
+    [
+        ({"width": 65536, "height": 65536}, "max_output_pixels"),
+        ({"num_inference_steps": 101}, "max_steps"),
+    ],
+)
+def test_admission_limits_reject_before_generation(
+    controller: UMMController, parameters: dict[str, int], message: str
+) -> None:
+    with pytest.raises(UMMRequestError, match=message):
+        controller.transition(
+            StagePayload("request", OmniRequest("prompt", parameters), None)
+        )
+    assert not controller.contexts
+    assert controller.outbox.empty()
+
+
+def test_output_reservation_rejects_before_generation(
+    controller: UMMController,
+) -> None:
+    controller.limits = replace(controller.limits, max_retained_bytes=1024)
+    with pytest.raises(UMMRequestError, match="max_retained_bytes"):
+        controller.transition(StagePayload("request", OmniRequest("prompt"), None))
+    assert not controller.contexts
+    assert controller.outbox.empty()
+
+
+def test_batch_cancellation_preserves_live_members_and_clears_scope() -> None:
+    cancelled_requests = {"first"}
+    payloads = [
+        StagePayload(request_id, OmniRequest("prompt"), None)
+        for request_id in ("first", "second")
+    ]
+    with GenerationScope(
+        payloads, cancelled_requests.__contains__, torch.device("cpu"), None
+    ):
+        generation_checkpoint()
+        cancelled_requests.add("second")
+        with pytest.raises(RequestCancelledError):
+            generation_checkpoint()
+    generation_checkpoint()
+    with GenerationScope(
+        [StagePayload("next", OmniRequest("prompt"), None)],
+        cancelled_requests.__contains__,
+        torch.device("cpu"),
+        None,
+    ):
+        generation_checkpoint()
+
+
+def test_expired_phase_stops_at_checkpoint() -> None:
+    payload = StagePayload(
+        "expired",
+        OmniRequest("prompt", metadata={UMM_DEADLINE_METADATA_KEY: 0.0}),
+        None,
+    )
+    with GenerationScope(
+        [payload], lambda request_id: False, torch.device("cpu"), None
+    ):
+        with pytest.raises(RequestCancelledError):
+            generation_checkpoint()

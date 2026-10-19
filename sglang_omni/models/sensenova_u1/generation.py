@@ -9,6 +9,7 @@ import torch
 from pydantic import JsonValue
 from transformers import PreTrainedTokenizerBase
 
+from sglang_omni.models.sensenova_u1.admission import validate_output_dimensions
 from sglang_omni.models.sensenova_u1.cache_dit import SenseNovaCacheDit
 from sglang_omni.models.sensenova_u1.image_processing import (
     encode_image,
@@ -283,6 +284,7 @@ def generate_image_edit(
     references = prepare_reference_images(inputs.get("image_b64"), options)
     token_usage = {}
     width, height = resolve_edit_output_size(references, options)
+    validate_output_dimensions(payload.request, width, height)
     prepare_cache_dit(
         model,
         enable_cache_dit=options.enable_cache_dit,

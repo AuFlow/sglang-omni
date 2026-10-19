@@ -19,6 +19,7 @@ DEFAULT_LAYERWISE_OFFLOAD = False
 
 
 class SenseNovaGenerationFactoryArgs(FactoryArgs):
+    cooperative_cancellation: bool = False
     dtype: Annotated[str | None, FactoryDefault(value=DEFAULT_GENERATION_DTYPE)] = None
     enable_cache_dit: bool | None = None
     cache_dit_params: dict[str, int | float] | None = None

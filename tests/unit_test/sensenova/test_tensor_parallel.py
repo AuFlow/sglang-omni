@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU/Gloo numerical checks; no checkpoint or accelerator is required."""
 
+import asyncio
 import copy
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,12 +14,19 @@ import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch import nn
 
+from sglang_omni.models.sensenova_u1.cancellation import (
+    GenerationScope,
+    generation_checkpoint,
+)
 from sglang_omni.models.sensenova_u1.tensor_parallel import (
     apply_tensor_parallel,
     initialize_tp,
     synchronize_tp_noise,
     validate_tp_settings,
 )
+from sglang_omni.proto.request import OmniRequest, StagePayload
+from sglang_omni.scheduling.message import IncomingMessage, RequestCancelledError
+from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
 
 
 def make_model():
@@ -211,3 +220,60 @@ def test_group_initialization_uses_local_device_and_launcher_port(
     assert calls["init_method"] == "tcp://127.0.0.1:29991"
     assert calls["rank"] == 1
     assert calls["world_size"] == 2
+
+
+def cancel_and_resume_generation(rank: int, rendezvous: str) -> None:
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=rendezvous,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=20),
+    )
+    execution_loop = asyncio.new_event_loop()
+    try:
+
+        def compute(payload: StagePayload) -> StagePayload:
+            with GenerationScope(
+                [payload],
+                scheduler.is_aborted,
+                torch.device("cpu"),
+                torch.distributed.group.WORLD,
+            ):
+                generation_checkpoint()
+                total = torch.ones((), dtype=torch.int32)
+                torch.distributed.all_reduce(total)
+                payload.data = int(total.item())
+                generation_checkpoint()
+                return payload
+
+        scheduler = TensorParallelScheduler(compute, cooperative_cancellation=True)
+        if rank == 0:
+            scheduler.abort("cancelled")
+        else:
+            pass
+        cancelled = StagePayload("cancelled", OmniRequest("prompt"), None)
+        scheduler.run_single(
+            IncomingMessage("cancelled", "new_request", cancelled), execution_loop
+        )
+        failure = scheduler.outbox.get_nowait()
+        assert failure.type == "error"
+        assert isinstance(failure.data, RequestCancelledError)
+        assert scheduler.compute_error is None
+        subsequent = StagePayload("next", OmniRequest("prompt"), None)
+        scheduler.run_single(
+            IncomingMessage("next", "new_request", subsequent), execution_loop
+        )
+        result = scheduler.outbox.get_nowait()
+        assert result.type == "result"
+        assert result.data.data == 2
+    finally:
+        execution_loop.close()
+        torch.distributed.destroy_process_group()
+
+
+def test_asymmetric_cancellation_leaves_tp_group_reusable(tmp_path: Path) -> None:
+    rendezvous = (tmp_path / "cancellation-rendezvous").as_uri()
+    torch.multiprocessing.spawn(
+        cancel_and_resume_generation, args=(rendezvous,), nprocs=2, join=True
+    )

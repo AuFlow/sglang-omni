@@ -11,7 +11,17 @@ from typing import Literal
 import torch
 from transformers import AutoModel, AutoTokenizer
 
+from sglang_omni.models.sensenova_u1.admission import (
+    ADMISSION_METADATA_KEY,
+    SenseNovaAdmissionLimits,
+    validate_admission,
+    validate_output_dimensions,
+)
 from sglang_omni.models.sensenova_u1.cache_dit import SenseNovaCacheDit
+from sglang_omni.models.sensenova_u1.cancellation import (
+    GenerationScope,
+    generation_checkpoint,
+)
 from sglang_omni.models.sensenova_u1.generation import (
     generate_image,
     generate_images,
@@ -117,6 +127,13 @@ def image_generation_batch_key(
 
 def validate_generation_request(payload: StagePayload, model: NEOChatModel) -> None:
     """Reject invalid TP work before the leader dispatches it to other ranks."""
+    limits = payload.request.metadata.get(ADMISSION_METADATA_KEY)
+    if limits is not None:
+        validate_admission(
+            payload.request, SenseNovaAdmissionLimits.model_validate(limits)
+        )
+    else:
+        pass
     inputs = payload.request.inputs
     is_edit = isinstance(inputs, dict) and inputs.get("task") == "image_edit"
     if is_edit:
@@ -127,7 +144,8 @@ def validate_generation_request(payload: StagePayload, model: NEOChatModel) -> N
             pass
         options = SenseNovaU1ImageEditSampling.from_params(payload.request.params)
         references = prepare_reference_images(inputs.get("image_b64"), options)
-        resolve_edit_output_size(references, options)
+        width, height = resolve_edit_output_size(references, options)
+        validate_output_dimensions(payload.request, width, height)
         branch_count = image_guidance_branch_count(
             options.guidance_scale, options.img_cfg_scale
         )
@@ -159,6 +177,7 @@ def create_generation_executor(
     tp_size: int = 1,
     nccl_port: int | None = None,
     dtype: str | None,
+    cooperative_cancellation: bool,
     max_batch_size: int = 1,
     max_batch_wait_ms: float = 0,
     max_batch_cost: int | None = None,
@@ -241,13 +260,37 @@ def create_generation_executor(
         pass
     batch_enabled = max_batch_size > 1
 
+    def _should_cancel(request_id: str) -> bool:
+        stopping = (
+            scheduler.stop_requested
+            if isinstance(scheduler, TensorParallelScheduler)
+            else not scheduler.running
+        )
+        return stopping or scheduler.is_aborted(request_id)
+
     def _generate(payload: StagePayload) -> StagePayload:
-        with offload.request() if offload is not None else nullcontext():
-            return generate_image(payload, model, tokenizer)
+        cancellation = (
+            GenerationScope([payload], _should_cancel, resolved_device, tp_group)
+            if cooperative_cancellation
+            else nullcontext()
+        )
+        with cancellation, offload.request() if offload is not None else nullcontext():
+            generation_checkpoint()
+            result = generate_image(payload, model, tokenizer)
+            generation_checkpoint()
+            return result
 
     def _generate_batch(payloads: list[StagePayload]) -> list[StagePayload]:
-        with offload.request() if offload is not None else nullcontext():
-            return generate_images(payloads, model, tokenizer)
+        cancellation = (
+            GenerationScope(payloads, _should_cancel, resolved_device, tp_group)
+            if cooperative_cancellation
+            else nullcontext()
+        )
+        with cancellation, offload.request() if offload is not None else nullcontext():
+            generation_checkpoint()
+            results = generate_images(payloads, model, tokenizer)
+            generation_checkpoint()
+            return results
 
     def _shutdown() -> None:
         try:
@@ -265,17 +308,19 @@ def create_generation_executor(
                 pass
 
     if tp_size > 1:
-        return TensorParallelScheduler(
+        scheduler = TensorParallelScheduler(
             _generate,
             validate_request=lambda payload: validate_generation_request(
                 payload, model
             ),
             shutdown_callback=_shutdown,
+            cooperative_cancellation=cooperative_cancellation,
         )
+        return scheduler
     else:
         pass
 
-    return SimpleScheduler(
+    scheduler = SimpleScheduler(
         _generate,
         batch_compute_fn=_generate_batch if batch_enabled else None,
         max_batch_size=max_batch_size,
@@ -286,3 +331,5 @@ def create_generation_executor(
         shutdown_callback=_shutdown,
         shutdown_on_compute_thread=True,
     )
+
+    return scheduler

@@ -489,6 +489,7 @@ def test_generation_executor_uses_resolved_npu_device(monkeypatch):
 
     scheduler = stages.create_generation_executor(
         "/model/sensenova",
+        cooperative_cancellation=False,
         device=None,
         gpu_id=3,
         dtype="bfloat16",

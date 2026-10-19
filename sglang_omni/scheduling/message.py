@@ -13,6 +13,10 @@ IncomingMessageType = Literal[
 ]
 
 
+class RequestCancelledError(RuntimeError):
+    """Compute stopped at a safe boundary; its scheduler remains reusable."""
+
+
 @dataclass
 class IncomingMessage:
     request_id: str
