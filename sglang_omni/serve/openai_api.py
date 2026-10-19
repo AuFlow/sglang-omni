@@ -1594,7 +1594,7 @@ def register_image_edits(app: FastAPI) -> None:
         num_inference_steps: int | None = Form(default=None),
         guidance_scale: float | None = Form(default=None),
         img_cfg_scale: float | None = Form(default=None),
-        enable_cache_dit: bool | None = Form(default=None),
+        enable_cache_dit: str | None = Form(default=None),
         cache_dit_params: str | None = Form(default=None),
     ) -> ImageGenerationResponse:
         if model is not None and model != app.state.model_name:
@@ -1631,8 +1631,14 @@ def register_image_edits(app: FastAPI) -> None:
                 pass
             num_outputs = n
             params = {"n": 1, "size_explicit": size is not None}
-            if enable_cache_dit is not None:
-                params["enable_cache_dit"] = enable_cache_dit
+            if enable_cache_dit is not None and enable_cache_dit:
+                normalized_cache_dit = enable_cache_dit.strip().lower()
+                if normalized_cache_dit in ("true", "1", "yes", "on"):
+                    params["enable_cache_dit"] = True
+                elif normalized_cache_dit in ("false", "0", "no", "off"):
+                    params["enable_cache_dit"] = False
+                else:
+                    raise ValueError("enable_cache_dit must be a boolean")
             else:
                 pass
             if cache_dit_params is not None:
