@@ -77,23 +77,25 @@ class LayerWeight:
 
     def get(self) -> torch.Tensor:
         if self.is_parameter:
-            return self.module._parameters[
+            return self.module._parameters[  # noqa: leading-underscore -- PyTorch registered tensor storage
                 self.name
-            ].data  # noqa: leading-underscore -- existing native model or backend API
+            ].data
         else:
             pass
-        return self.module._buffers[
+        return self.module._buffers[  # noqa: leading-underscore -- PyTorch registered tensor storage
             self.name
-        ]  # noqa: leading-underscore -- existing native model or backend API
+        ]
 
     def set(self, tensor: torch.Tensor) -> None:
         if self.is_parameter:
-            self.module._parameters[self.name].data = (
-                tensor  # noqa: leading-underscore -- existing native model or backend API
+            self.module._parameters[
+                self.name
+            ].data = (  # noqa: leading-underscore -- PyTorch registered tensor storage
+                tensor
             )
         else:
             self.module._buffers[self.name] = (
-                tensor  # noqa: leading-underscore -- existing native model or backend API
+                tensor  # noqa: leading-underscore -- PyTorch registered tensor storage
             )
 
 
@@ -143,12 +145,12 @@ class SenseNovaLayerwiseOffload:
                 for is_parameter, values in (
                     (
                         True,
-                        module._parameters,
-                    ),  # noqa: leading-underscore -- existing native model or backend API
+                        module._parameters,  # noqa: leading-underscore -- PyTorch registered tensor storage
+                    ),
                     (
                         False,
-                        module._buffers,
-                    ),  # noqa: leading-underscore -- existing native model or backend API
+                        module._buffers,  # noqa: leading-underscore -- PyTorch registered tensor storage
+                    ),
                 ):
                     for name, tensor in values.items():
                         if tensor is None:
@@ -178,9 +180,9 @@ class SenseNovaLayerwiseOffload:
             if any(
                 tensor is not None and id(tensor) in owners
                 for tensor in (
-                    *module._parameters.values(),
-                    *module._buffers.values(),
-                )  # noqa: leading-underscore -- existing native model or backend API
+                    *module._parameters.values(),  # noqa: leading-underscore -- PyTorch registered tensor storage
+                    *module._buffers.values(),  # noqa: leading-underscore -- PyTorch registered tensor storage
+                )
             ):
                 raise ValueError("Offloaded blocks cannot share non-block weights")
             else:
@@ -222,9 +224,7 @@ class SenseNovaLayerwiseOffload:
         finally:
             setattr(parent, name, self.layers)
         for index in sorted(self.residents):
-            self._load(
-                index
-            )  # noqa: leading-underscore -- existing native model or backend API
+            self.load_weights(index)
         if self.copy_stream is not None:
             self.copy_stream.synchronize()
         else:
@@ -232,12 +232,12 @@ class SenseNovaLayerwiseOffload:
         try:
             for index, layer in enumerate(self.layers):
                 self.hooks.append(
-                    layer.register_forward_pre_hook(self._before(index))
-                )  # noqa: leading-underscore -- existing native model or backend API
+                    layer.register_forward_pre_hook(self.before_forward(index))
+                )
                 self.hooks.append(
                     layer.register_forward_hook(
-                        self._after(index), always_call=True
-                    )  # noqa: leading-underscore -- existing native model or backend API
+                        self.after_forward(index), always_call=True
+                    )
                 )
         except BaseException:
             self.close()
@@ -248,9 +248,7 @@ class SenseNovaLayerwiseOffload:
             f"policy={config.residency_policy}, pinned={config.pin_cpu_memory}"
         )
 
-    def _load(
-        self, index: int
-    ) -> None:  # noqa: leading-underscore -- existing native model or backend API
+    def load_weights(self, index: int) -> None:
         if index in self.loaded:
             return
         else:
@@ -271,14 +269,10 @@ class SenseNovaLayerwiseOffload:
                     event.record(self.copy_stream)
                     self.ready[index] = event
         except BaseException:
-            self._release(
-                index
-            )  # noqa: leading-underscore -- existing native model or backend API
+            self.release_weights(index)
             raise
 
-    def _release(
-        self, index: int
-    ) -> None:  # noqa: leading-underscore -- existing native model or backend API
+    def release_weights(self, index: int) -> None:
         if index not in self.loaded:
             return
         else:
@@ -298,20 +292,14 @@ class SenseNovaLayerwiseOffload:
         self.loaded.remove(index)
         self.ready.pop(index, None)
 
-    def _before(
-        self, index: int
-    ) -> (
-        LayerPreHook
-    ):  # noqa: leading-underscore -- existing native model or backend API
+    def before_forward(self, index: int) -> LayerPreHook:
         # note (Codex): PyTorch requires module and input arguments even when unused.
         def hook(module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
             if not self.is_active:
                 raise RuntimeError("Run offloaded generation inside manager.request()")
             else:
                 pass
-            self._load(
-                index
-            )  # noqa: leading-underscore -- existing native model or backend API
+            self.load_weights(index)
             if self.copy_stream is not None:
                 torch.cuda.current_stream(self.device).wait_event(self.ready[index])
             else:
@@ -320,17 +308,11 @@ class SenseNovaLayerwiseOffload:
                 i for i in range(index + 1, len(self.layers)) if i not in self.residents
             )
             for _, next_index in zip(range(self.config.prefetch_size), upcoming):
-                self._load(
-                    next_index
-                )  # noqa: leading-underscore -- existing native model or backend API
+                self.load_weights(next_index)
 
         return hook
 
-    def _after(
-        self, index: int
-    ) -> (
-        LayerPostHook
-    ):  # noqa: leading-underscore -- existing native model or backend API
+    def after_forward(self, index: int) -> LayerPostHook:
         # note (Codex): PyTorch supplies None when an always-called hook follows failure.
         def hook(
             module: nn.Module,
@@ -338,9 +320,7 @@ class SenseNovaLayerwiseOffload:
             output: torch.Tensor | None,
         ) -> None:
             if index not in self.residents:
-                self._release(
-                    index
-                )  # noqa: leading-underscore -- existing native model or backend API
+                self.release_weights(index)
             else:
                 pass
 
@@ -371,9 +351,7 @@ class SenseNovaLayerwiseOffload:
                 else:
                     pass
                 for index in sorted(self.loaded - self.residents):
-                    self._release(
-                        index
-                    )  # noqa: leading-underscore -- existing native model or backend API
+                    self.release_weights(index)
             finally:
                 self.is_active = False
                 self.lock.release()
@@ -393,9 +371,7 @@ class SenseNovaLayerwiseOffload:
                 handle.remove()
             self.hooks.clear()
             for index in sorted(self.loaded):
-                self._release(
-                    index
-                )  # noqa: leading-underscore -- existing native model or backend API
+                self.release_weights(index)
             self.is_closed = True
         finally:
             self.lock.release()

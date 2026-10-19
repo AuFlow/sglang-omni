@@ -30,8 +30,8 @@ def tiny_dense_config(num_hidden_layers=2):
         rms_norm_eps=1e-6,
     )
     config.layer_types = ["full_attention"] * num_hidden_layers
-    config._attn_implementation = (
-        "eager"  # noqa: leading-underscore -- existing native model or backend API
+    config._attn_implementation = (  # noqa: leading-underscore -- Transformers attention backend field
+        "eager"
     )
     return config
 
@@ -157,9 +157,7 @@ def test_image_only_matches_all_true_indicators():
 @pytest.mark.parametrize("interval", [(0.0, 1.0), (0.25, 0.75), (0.5, 0.5), (0.7, 0.8)])
 def test_t2i_cfg_schedule_preserves_scalar_decisions(needs_cfg, shift, interval):
     timesteps = torch.linspace(0, 1, 9)
-    timesteps = NEOChatModel._apply_time_schedule(  # noqa: leading-underscore -- existing native model or backend API
-        SimpleNamespace(), timesteps, 4, shift
-    )
+    timesteps = NEOChatModel.apply_time_schedule(SimpleNamespace(), timesteps, 4, shift)
     probes = []
     for endpoint in dict.fromkeys(interval):
         edge = timesteps.new_tensor(endpoint)
@@ -176,9 +174,7 @@ def test_t2i_cfg_schedule_preserves_scalar_decisions(needs_cfg, shift, interval)
         for t in timesteps[:-1]
     ]
 
-    assert (
-        NEOChatModel._build_cfg_schedule(timesteps, interval, needs_cfg) == expected
-    )  # noqa: leading-underscore -- existing native model or backend API
+    assert NEOChatModel.build_cfg_schedule(timesteps, interval, needs_cfg) == expected
 
 
 @pytest.mark.parametrize("interval", [(0.0, 1.0), (0.25, 0.75), (0.7, 0.8)])
@@ -189,6 +185,4 @@ def test_i2i_cfg_schedule_preserves_strict_interval_semantics(interval):
         for t in timesteps[:-1]
     ]
 
-    assert (
-        NEOChatModel._build_i2i_cfg_schedule(timesteps, interval) == expected
-    )  # noqa: leading-underscore -- existing native model or backend API
+    assert NEOChatModel.build_i2i_cfg_schedule(timesteps, interval) == expected

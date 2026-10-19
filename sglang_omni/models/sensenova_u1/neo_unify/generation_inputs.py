@@ -112,9 +112,7 @@ def apply_time_schedule(
         shift = timestep_shift
         sigma = shift * sigma / (1 + (shift - 1) * sigma)
     elif self.time_schedule == "dynamic":
-        mu = self._calculate_dynamic_mu(
-            image_seq_len
-        )  # noqa: leading-underscore -- existing native model or backend API
+        mu = self.calculate_dynamic_mu(image_seq_len)
         mu_t = t.new_tensor(mu)
         if self.time_shift_type == "exponential":
             shift = torch.exp(mu_t)
@@ -284,15 +282,3 @@ def get_thw_indexes(
     else:
         pass
     return torch.stack([t_indexes, h_indexes, w_indexes], dim=0)
-
-
-# note (Codex): Preserve existing import and serialized class lookup names.
-_apply_time_schedule = apply_time_schedule
-_build_cfg_schedule = build_cfg_schedule
-_build_i2i_cfg_schedule = build_i2i_cfg_schedule
-_build_it2i_inputs = build_it2i_inputs
-_build_t2i_image_indexes = build_t2i_image_indexes
-_build_t2i_query = build_t2i_query
-_build_t2i_text_inputs = build_t2i_text_inputs
-_calculate_dynamic_mu = calculate_dynamic_mu  # noqa: leading-underscore -- existing native model or backend API
-_euler_step = euler_step

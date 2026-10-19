@@ -227,9 +227,7 @@ def apply_tensor_parallel(
     for layer in backbone.layers:
         for mlp in (layer.mlp, layer.mlp_mot_gen):
             mlp.intermediate_size //= tensor_parallel_size
-            mlp._npu_gate_up_weight = (
-                None  # noqa: leading-underscore -- existing native model or backend API
-            )
+            mlp.npu_gate_up_weight = None
     model.sensenova_tp_size = tensor_parallel_size
     model.sensenova_tp_group = process_group
 

@@ -876,7 +876,6 @@ class Client:
                 chunk.images_b64 = images_b64
             else:
                 pass
-            chunk.usage = Client.build_usage_info(result)
             chunk.image_usage = result.get("image_usage")
             if result.get("image") is not None:
                 chunk.image = result["image"]

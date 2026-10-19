@@ -34,33 +34,15 @@ from sglang_omni.models.sensenova_u1.neo_unify.flow_matching import (
     TimestepEmbedder,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    apply_time_schedule as _apply_time_schedule,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    build_cfg_schedule as _build_cfg_schedule,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    build_i2i_cfg_schedule as _build_i2i_cfg_schedule,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    build_it2i_inputs as _build_it2i_inputs,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    build_t2i_image_indexes as _build_t2i_image_indexes,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    build_t2i_query as _build_t2i_query,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    build_t2i_text_inputs as _build_t2i_text_inputs,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    calculate_dynamic_mu as _calculate_dynamic_mu,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
-    euler_step as _euler_step,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
+    apply_time_schedule,
+    build_cfg_schedule,
+    build_i2i_cfg_schedule,
+    build_it2i_inputs,
+    build_t2i_image_indexes,
+    build_t2i_query,
+    build_t2i_text_inputs,
+    calculate_dynamic_mu,
+    euler_step,
     get_thw_indexes,
     patchify,
     unpatchify,
@@ -96,22 +78,12 @@ from sglang_omni.models.sensenova_u1.neo_unify.modeling_qwen3_moe import (
     Qwen3MoeForCausalLM,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.native_thinking import (
-    append_text_tokens_to_cache as _append_text_tokens_to_cache,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.native_thinking import (
-    generate_think as _generate_think,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.native_thinking import (
-    it2i_prefix_forward as _it2i_prefix_forward,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.native_thinking import (
-    t2i_predict_v as _t2i_predict_v,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.native_thinking import (
-    t2i_prefix_forward as _t2i_prefix_forward,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.native_thinking import (
-    think_prefix_forward as _think_prefix_forward,
+    append_text_tokens_to_cache,
+    generate_think,
+    it2i_prefix_forward,
+    t2i_predict_v,
+    t2i_prefix_forward,
+    think_prefix_forward,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.prefix_cache import (
     KV_DIAGNOSTIC_DIR as _KV_DIAGNOSTIC_DIR,
@@ -147,19 +119,11 @@ from sglang_omni.models.sensenova_u1.neo_unify.prefix_cache import (
     token_ids_sha256 as _token_ids_sha256,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.srt_thinking import (
-    import_srt_prefix_tokens as _import_srt_prefix_tokens,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.srt_thinking import (
-    replay_srt_think_prefix as _replay_srt_think_prefix,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.srt_thinking import (
-    request_srt_think_tokens as _request_srt_think_tokens,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.srt_thinking import (
-    try_import_srt_text_prefix as _try_import_srt_text_prefix,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.srt_thinking import (
-    try_import_srt_text_prefix_batch as _try_import_srt_text_prefix_batch,
+    import_srt_prefix_tokens,
+    replay_srt_think_prefix,
+    request_srt_think_tokens,
+    try_import_srt_text_prefix,
+    try_import_srt_text_prefix_batch,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.text_to_image_generation import (
     t2i_generate,
@@ -203,8 +167,8 @@ class NEOChatModel(PreTrainedModel):
         self.patch_size: int = patch_size
         self.template: str = config.template
         self.downsample_ratio: float = config.downsample_ratio
-        config.llm_config._attn_implementation = (
-            "eager"  # noqa: leading-underscore -- existing native model or backend API
+        config.llm_config._attn_implementation = (  # noqa: leading-underscore -- Transformers attention backend field
+            "eager"
         )
 
         if vision_model is not None:
@@ -281,12 +245,8 @@ class NEOChatModel(PreTrainedModel):
         # note (Wes): Transformers 5 requires composite tied-weight metadata before loading.
         self.post_init()
 
-    def _notify_layer_offload_phase(
-        self, phase: str
-    ) -> None:  # noqa: leading-underscore -- existing native model or backend API
-        callback = getattr(
-            self, "_layer_offload_phase_callback", None
-        )  # noqa: leading-underscore -- existing native model or backend API
+    def notify_layer_offload_phase(self, phase: str) -> None:
+        callback = getattr(self, "layer_offload_phase_callback", None)
         if callback is not None:
             callback(phase)
         else:
@@ -350,45 +310,45 @@ class NEOChatModel(PreTrainedModel):
 
     unpatchify = unpatchify
 
-    _euler_step = _euler_step
+    euler_step = euler_step
 
-    _build_cfg_schedule = staticmethod(_build_cfg_schedule)
+    build_cfg_schedule = staticmethod(build_cfg_schedule)
 
-    _build_i2i_cfg_schedule = staticmethod(_build_i2i_cfg_schedule)
+    build_i2i_cfg_schedule = staticmethod(build_i2i_cfg_schedule)
 
-    _calculate_dynamic_mu = _calculate_dynamic_mu
+    calculate_dynamic_mu = calculate_dynamic_mu
 
-    _apply_time_schedule = _apply_time_schedule
+    apply_time_schedule = apply_time_schedule
 
-    _build_t2i_query = _build_t2i_query
+    build_t2i_query = build_t2i_query
 
-    _build_t2i_text_inputs = _build_t2i_text_inputs
+    build_t2i_text_inputs = build_t2i_text_inputs
 
-    _build_t2i_image_indexes = _build_t2i_image_indexes
+    build_t2i_image_indexes = build_t2i_image_indexes
 
-    _t2i_prefix_forward = _t2i_prefix_forward
+    t2i_prefix_forward = t2i_prefix_forward
 
-    _it2i_prefix_forward = _it2i_prefix_forward
+    it2i_prefix_forward = it2i_prefix_forward
 
-    _think_prefix_forward = _think_prefix_forward
+    think_prefix_forward = think_prefix_forward
 
-    _append_text_tokens_to_cache = _append_text_tokens_to_cache
+    append_text_tokens_to_cache = append_text_tokens_to_cache
 
-    _request_srt_think_tokens = _request_srt_think_tokens
+    request_srt_think_tokens = request_srt_think_tokens
 
-    _import_srt_prefix_tokens = _import_srt_prefix_tokens
+    import_srt_prefix_tokens = import_srt_prefix_tokens
 
-    _try_import_srt_text_prefix = _try_import_srt_text_prefix
+    try_import_srt_text_prefix = try_import_srt_text_prefix
 
-    _try_import_srt_text_prefix_batch = _try_import_srt_text_prefix_batch
+    try_import_srt_text_prefix_batch = try_import_srt_text_prefix_batch
 
-    _replay_srt_think_prefix = _replay_srt_think_prefix
+    replay_srt_think_prefix = replay_srt_think_prefix
 
-    _generate_think = _generate_think
+    generate_think = generate_think
 
-    _t2i_predict_v = _t2i_predict_v
+    t2i_predict_v = t2i_predict_v
 
-    _build_it2i_inputs = _build_it2i_inputs
+    build_it2i_inputs = build_it2i_inputs
 
     interleave_gen_image_only = interleave_gen_image_only
 

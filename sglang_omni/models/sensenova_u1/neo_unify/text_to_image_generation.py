@@ -82,9 +82,7 @@ def t2i_generate(
         and thinking_backend is not None
         and hasattr(thinking_backend, "transfer_prefix_kv")
     )
-    compact_mode = getattr(
-        self, "_sensenova_compact_mode", False
-    )  # noqa: leading-underscore -- existing native model or backend API
+    compact_mode = getattr(self, "sensenova_compact_mode", False)
     if compact_mode and len(prompts) > 2:
         raise RuntimeError("SenseNova compact mode supports at most two T2I prompts")
     else:
@@ -96,9 +94,7 @@ def t2i_generate(
         )
     else:
         pass
-    self._notify_layer_offload_phase(
-        "prefix"
-    )  # noqa: leading-underscore -- existing native model or backend API
+    self.notify_layer_offload_phase("prefix")
     merge_size = int(1 / self.downsample_ratio)
 
     self.config.t_eps = t_eps
@@ -112,7 +108,7 @@ def t2i_generate(
         "<think>\n" if think_mode else "<think>\n\n</think>\n\n" + IMG_START_TOKEN
     )
     query_conditions = [
-        self._build_t2i_query(  # noqa: leading-underscore -- existing native model or backend API
+        self.build_t2i_query(
             item,
             system_message=SYSTEM_MESSAGE_FOR_GEN,
             append_text=think_content,
@@ -123,9 +119,7 @@ def t2i_generate(
         query_conditions[0] if len(query_conditions) == 1 else query_conditions
     )
     query_uncondition = (
-        self._build_t2i_query("", append_text=IMG_START_TOKEN)
-        if needs_cfg
-        else None  # noqa: leading-underscore -- existing native model or backend API
+        self.build_t2i_query("", append_text=IMG_START_TOKEN) if needs_cfg else None
     )
 
     (
@@ -134,9 +128,7 @@ def t2i_generate(
         attention_mask_condition_prefix,
         condition_key_valid_mask,
         condition_prefix_lengths,
-    ) = self._build_t2i_text_inputs(
-        tokenizer, query_condition
-    )  # noqa: leading-underscore -- existing native model or backend API
+    ) = self.build_t2i_text_inputs(tokenizer, query_condition)
     if query_uncondition is not None:
         (
             input_ids_uncondition,
@@ -144,9 +136,7 @@ def t2i_generate(
             attention_mask_uncondition_prefix,
             _,
             uncondition_prefix_lengths,
-        ) = self._build_t2i_text_inputs(
-            tokenizer, query_uncondition
-        )  # noqa: leading-underscore -- existing native model or backend API
+        ) = self.build_t2i_text_inputs(tokenizer, query_uncondition)
     else:
         input_ids_uncondition = indexes_uncondition = (
             attention_mask_uncondition_prefix
@@ -156,7 +146,7 @@ def t2i_generate(
     token_h = image_size[1] // (self.patch_size * merge_size)
     token_w = image_size[0] // (self.patch_size * merge_size)
 
-    indexes_image_condition = self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
+    indexes_image_condition = self.build_t2i_image_indexes(
         token_h,
         token_w,
         (
@@ -167,7 +157,7 @@ def t2i_generate(
         device=input_ids_condition.device,
     )
     indexes_image_uncondition = (
-        self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
+        self.build_t2i_image_indexes(
             token_h,
             token_w,
             int(uncondition_prefix_lengths[0].item()),
@@ -215,7 +205,7 @@ def t2i_generate(
             (
                 past_key_values_uncondition,
                 uncondition_transfer_timings,
-            ) = self._try_import_srt_text_prefix(  # noqa: leading-underscore -- existing native model or backend API
+            ) = self.try_import_srt_text_prefix(
                 thinking_backend,
                 input_ids_uncondition,
                 uncondition_prefix_lengths[0],
@@ -237,12 +227,10 @@ def t2i_generate(
         else:
             pass
         if past_key_values_uncondition is None:
-            past_key_values_uncondition, _ = (
-                self._t2i_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
-                    input_ids_uncondition,
-                    indexes_uncondition,
-                    attention_mask_uncondition_prefix,
-                )
+            past_key_values_uncondition, _ = self.t2i_prefix_forward(
+                input_ids_uncondition,
+                indexes_uncondition,
+                attention_mask_uncondition_prefix,
             )
         else:
             pass
@@ -259,9 +247,7 @@ def t2i_generate(
         )
     else:
         pass
-    self._notify_layer_offload_phase(
-        "denoise"
-    )  # noqa: leading-underscore -- existing native model or backend API
+    self.notify_layer_offload_phase("denoise")
 
     image_prediction = text_image_denoise(
         batch_size,

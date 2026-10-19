@@ -74,9 +74,7 @@ class GenerationState(Protocol):
     last_srt_kv_transfer_timings_list: list[PrefixTimings]
     last_srt_kv_transferred_prefixes: list[str]
 
-    def _notify_layer_offload_phase(
-        self, phase: str
-    ) -> None: ...  # noqa: leading-underscore -- existing native model or backend API
+    def notify_layer_offload_phase(self, phase: str) -> None: ...
 
     def extract_feature(
         self,
@@ -97,7 +95,7 @@ class GenerationState(Protocol):
         w: int | None = None,
     ) -> torch.Tensor: ...
 
-    def _euler_step(  # noqa: leading-underscore -- existing native model or backend API
+    def euler_step(
         self,
         v_pred: torch.Tensor,
         z: torch.Tensor,
@@ -106,37 +104,35 @@ class GenerationState(Protocol):
     ) -> torch.Tensor: ...
 
     @staticmethod
-    def _build_cfg_schedule(  # noqa: leading-underscore -- existing native model or backend API
+    def build_cfg_schedule(
         timesteps: torch.Tensor, cfg_interval: tuple[float, float], needs_cfg: bool
     ) -> list[bool]: ...
 
     @staticmethod
-    def _build_i2i_cfg_schedule(  # noqa: leading-underscore -- existing native model or backend API
+    def build_i2i_cfg_schedule(
         timesteps: torch.Tensor, cfg_interval: tuple[float, float]
     ) -> list[bool]: ...
 
-    def _calculate_dynamic_mu(
-        self, image_seq_len: int
-    ) -> float: ...  # noqa: leading-underscore -- existing native model or backend API
+    def calculate_dynamic_mu(self, image_seq_len: int) -> float: ...
 
-    def _apply_time_schedule(  # noqa: leading-underscore -- existing native model or backend API
+    def apply_time_schedule(
         self, t: torch.Tensor, image_seq_len: int, timestep_shift: float
     ) -> torch.Tensor: ...
 
-    def _build_t2i_query(  # noqa: leading-underscore -- existing native model or backend API
+    def build_t2i_query(
         self,
         prompt_text: str,
         system_message: str | None = None,
         append_text: str | None = None,
     ) -> str: ...
 
-    def _build_t2i_text_inputs(  # noqa: leading-underscore -- existing native model or backend API
+    def build_t2i_text_inputs(
         self, tokenizer: PreTrainedTokenizerBase, query: str | list[str]
     ) -> tuple[
         torch.Tensor, torch.Tensor, dict[str, torch.Tensor], torch.Tensor, torch.Tensor
     ]: ...
 
-    def _build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
+    def build_t2i_image_indexes(
         self,
         token_h: int,
         token_w: int,
@@ -144,14 +140,14 @@ class GenerationState(Protocol):
         device: torch.device | None,
     ) -> torch.Tensor: ...
 
-    def _t2i_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
+    def t2i_prefix_forward(
         self,
         input_ids: torch.Tensor,
         indexes: torch.Tensor,
         attention_mask: dict[str, torch.Tensor],
     ) -> tuple[DynamicCache, torch.Tensor]: ...
 
-    def _it2i_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
+    def it2i_prefix_forward(
         self,
         input_imbeds: torch.Tensor,
         indexes: torch.Tensor,
@@ -159,15 +155,15 @@ class GenerationState(Protocol):
         gen_indicators: torch.Tensor | None = None,
     ) -> tuple[DynamicCache, torch.Tensor]: ...
 
-    def _think_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
+    def think_prefix_forward(
         self, **kwargs: Unpack[ThinkPrefixInputs]
     ) -> CausalLMOutputWithPast: ...
 
-    def _append_text_tokens_to_cache(  # noqa: leading-underscore -- existing native model or backend API
+    def append_text_tokens_to_cache(
         self, cache: DynamicCache, t_idx: int, input_ids: torch.Tensor
     ) -> int: ...
 
-    def _request_srt_think_tokens(  # noqa: leading-underscore -- existing native model or backend API
+    def request_srt_think_tokens(
         self,
         tokenizer: PreTrainedTokenizerBase,
         thinking_backend: ThinkingBackend,
@@ -178,14 +174,14 @@ class GenerationState(Protocol):
         list[list[int]], list[str], ThinkingSession | list[ThinkingSession] | None
     ]: ...
 
-    def _import_srt_prefix_tokens(  # noqa: leading-underscore -- existing native model or backend API
+    def import_srt_prefix_tokens(
         self,
         thinking_backend: ThinkingBackend,
         token_ids: list[int],
         session_context: ThinkingSession | None = None,
     ) -> tuple[DynamicCache, PrefixTimings]: ...
 
-    def _try_import_srt_text_prefix(  # noqa: leading-underscore -- existing native model or backend API
+    def try_import_srt_text_prefix(
         self,
         thinking_backend: ThinkingBackend,
         input_ids: torch.Tensor,
@@ -193,7 +189,7 @@ class GenerationState(Protocol):
         name: str,
     ) -> tuple[DynamicCache | None, PrefixTimings]: ...
 
-    def _try_import_srt_text_prefix_batch(  # noqa: leading-underscore -- existing native model or backend API
+    def try_import_srt_text_prefix_batch(
         self,
         thinking_backend: ThinkingBackend,
         input_ids: torch.Tensor,
@@ -201,7 +197,7 @@ class GenerationState(Protocol):
         name: str,
     ) -> tuple[DynamicCache | None, list[PrefixTimings]]: ...
 
-    def _replay_srt_think_prefix(  # noqa: leading-underscore -- existing native model or backend API
+    def replay_srt_think_prefix(
         self,
         tokenizer: PreTrainedTokenizerBase,
         input_ids: torch.Tensor,
@@ -215,7 +211,7 @@ class GenerationState(Protocol):
         DynamicCache, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor
     ]: ...
 
-    def _generate_think(  # noqa: leading-underscore -- existing native model or backend API
+    def generate_think(
         self,
         tokenizer: PreTrainedTokenizerBase,
         prefix_outputs: CausalLMOutputWithPast,
@@ -225,7 +221,7 @@ class GenerationState(Protocol):
         max_think_tokens: int = 1024,
     ) -> tuple[DynamicCache, int, str]: ...
 
-    def _t2i_predict_v(  # noqa: leading-underscore -- existing native model or backend API
+    def t2i_predict_v(
         self,
         input_embeds: torch.Tensor,
         indexes_image: torch.Tensor,
@@ -238,7 +234,7 @@ class GenerationState(Protocol):
         image_size: tuple[int, int] | None = None,
     ) -> torch.Tensor: ...
 
-    def _build_it2i_inputs(  # noqa: leading-underscore -- existing native model or backend API
+    def build_it2i_inputs(
         self,
         tokenizer: PreTrainedTokenizerBase,
         query: str,

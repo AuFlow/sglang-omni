@@ -46,8 +46,8 @@ def native_parity(rank, rendezvous, dtype):
             rms_norm_eps=1e-6,
         )
         config.layer_types = ["full_attention"] * 2
-        config._attn_implementation = (
-            "eager"  # noqa: leading-underscore -- existing native model or backend API
+        config._attn_implementation = (  # noqa: leading-underscore -- Transformers attention backend field
+            "eager"
         )
         reference = nn.Module()
         reference.language_model = Qwen3ForCausalLM(config).eval().to(dtype)

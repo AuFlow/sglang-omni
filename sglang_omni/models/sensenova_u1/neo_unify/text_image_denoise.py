@@ -140,14 +140,12 @@ def text_image_denoise(
 
     timesteps = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
     if enable_timestep_shift:
-        timesteps = self._apply_time_schedule(  # noqa: leading-underscore -- existing native model or backend API
+        timesteps = self.apply_time_schedule(
             timesteps, token_h * token_w, timestep_shift
         )
     else:
         pass
-    cfg_active = self._build_cfg_schedule(
-        timesteps, cfg_interval, needs_cfg
-    )  # noqa: leading-underscore -- existing native model or backend API
+    cfg_active = self.build_cfg_schedule(timesteps, cfg_interval, needs_cfg)
     denoise_embeddings = None
     if device.type == "npu":
         denoise_embeddings = self.fm_modules["timestep_embedder"](timesteps[:-1])
@@ -195,7 +193,7 @@ def text_image_denoise(
                 pass
         image_embeds = image_embeds + timestep_embeddings
 
-        v_pred_condition = self._t2i_predict_v(  # noqa: leading-underscore -- existing native model or backend API
+        v_pred_condition = self.t2i_predict_v(
             image_embeds,
             indexes_image_condition,
             attention_mask_condition,
@@ -208,7 +206,7 @@ def text_image_denoise(
         )
 
         if cfg_active[step_i]:
-            v_pred_uncondition = self._t2i_predict_v(  # noqa: leading-underscore -- existing native model or backend API
+            v_pred_uncondition = self.t2i_predict_v(
                 image_embeds,
                 indexes_image_uncondition,
                 attention_mask_uncondition,

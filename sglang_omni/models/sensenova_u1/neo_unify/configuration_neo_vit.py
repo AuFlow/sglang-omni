@@ -15,29 +15,23 @@ logger = logging.getLogger(__name__)
 
 
 @overload
-def _as_singleton_tuple(
+def as_singleton_tuple(
     value: int | Sequence[int],
-) -> tuple[
-    int, ...
-]: ...  # noqa: leading-underscore -- existing native model or backend API
+) -> tuple[int, ...]: ...
 
 
 @overload
-def _as_singleton_tuple(
+def as_singleton_tuple(
     value: float | Sequence[float],
-) -> tuple[
-    float, ...
-]: ...  # noqa: leading-underscore -- existing native model or backend API
+) -> tuple[float, ...]: ...
 
 
-def _as_singleton_tuple(  # noqa: leading-underscore -- existing native model or backend API
+def as_singleton_tuple(
     value: int | float | Sequence[int | float],
 ) -> tuple[int | float, ...]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         if len(value) == 1:
-            return _as_singleton_tuple(
-                value[0]
-            )  # noqa: leading-underscore -- existing native model or backend API
+            return as_singleton_tuple(value[0])
         else:
             pass
         return tuple(value)
@@ -65,12 +59,8 @@ class NEOVisionConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
         self.hidden_size: int = hidden_size
-        self.llm_hidden_size: tuple[int, ...] = _as_singleton_tuple(
-            llm_hidden_size
-        )  # noqa: leading-underscore -- existing native model or backend API
-        self.downsample_ratio: tuple[float, ...] = _as_singleton_tuple(
-            downsample_ratio
-        )  # noqa: leading-underscore -- existing native model or backend API
+        self.llm_hidden_size: tuple[int, ...] = as_singleton_tuple(llm_hidden_size)
+        self.downsample_ratio: tuple[float, ...] = as_singleton_tuple(downsample_ratio)
         self.rope_theta_vision: float = rope_theta_vision
         self.max_position_embeddings_vision: int = max_position_embeddings_vision
         self.num_channels: int = num_channels

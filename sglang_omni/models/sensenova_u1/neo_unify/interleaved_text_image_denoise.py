@@ -44,13 +44,13 @@ def interleaved_text_image_denoise(
     token_w = image_size[0] // (self.patch_size * merge_size)
     device = self.device
 
-    indexes_image_condition = self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
+    indexes_image_condition = self.build_t2i_image_indexes(
         token_h, token_w, t_index_cond + 1, device=device
     )
-    indexes_image_text_uncondition = self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
+    indexes_image_text_uncondition = self.build_t2i_image_indexes(
         token_h, token_w, t_index_tu + 1, device=device
     )
-    indexes_image_img_uncondition = self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
+    indexes_image_img_uncondition = self.build_t2i_image_indexes(
         token_h, token_w, indexes_iu[0].max() + 1, device=device
     )
 
@@ -104,7 +104,7 @@ def interleaved_text_image_denoise(
 
     timesteps = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
     if enable_timestep_shift:
-        timesteps = self._apply_time_schedule(  # noqa: leading-underscore -- existing native model or backend API
+        timesteps = self.apply_time_schedule(
             timesteps, token_h * token_w, timestep_shift
         )
     else:
@@ -155,7 +155,7 @@ def interleaved_text_image_denoise(
         image_embeds = image_embeds + timestep_embeddings
 
         use_cfg = (t > cfg_interval[0] and t < cfg_interval[1]) or cfg_interval[0] == 0
-        out_cond = self._t2i_predict_v(  # noqa: leading-underscore -- existing native model or backend API
+        out_cond = self.t2i_predict_v(
             image_embeds,
             indexes_image_condition,
             attention_mask_condition,
@@ -171,7 +171,7 @@ def interleaved_text_image_denoise(
         elif cfg_scale == 1 and img_cfg_scale == 1:
             v_pred = out_cond
         elif img_cfg_scale == 1:
-            out_img_cond = self._t2i_predict_v(  # noqa: leading-underscore -- existing native model or backend API
+            out_img_cond = self.t2i_predict_v(
                 image_embeds,
                 indexes_image_text_uncondition,
                 attention_mask_text_uncondition,
@@ -184,7 +184,7 @@ def interleaved_text_image_denoise(
             )
             v_pred = out_img_cond + cfg_scale * (out_cond - out_img_cond)
         elif cfg_scale == img_cfg_scale:
-            out_uncond = self._t2i_predict_v(  # noqa: leading-underscore -- existing native model or backend API
+            out_uncond = self.t2i_predict_v(
                 image_embeds,
                 indexes_image_img_uncondition,
                 attention_mask_img_uncondition,
@@ -197,7 +197,7 @@ def interleaved_text_image_denoise(
             )
             v_pred = out_uncond + cfg_scale * (out_cond - out_uncond)
         else:
-            out_img_cond = self._t2i_predict_v(  # noqa: leading-underscore -- existing native model or backend API
+            out_img_cond = self.t2i_predict_v(
                 image_embeds,
                 indexes_image_text_uncondition,
                 attention_mask_text_uncondition,
@@ -208,7 +208,7 @@ def interleaved_text_image_denoise(
                 timestep_embeddings=timestep_embeddings,
                 image_size=image_size,
             )
-            out_uncond = self._t2i_predict_v(  # noqa: leading-underscore -- existing native model or backend API
+            out_uncond = self.t2i_predict_v(
                 image_embeds,
                 indexes_image_img_uncondition,
                 attention_mask_img_uncondition,

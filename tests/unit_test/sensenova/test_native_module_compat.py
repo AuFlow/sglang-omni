@@ -46,14 +46,12 @@ def test_moe_config_detects_expert_count_without_model_type(
     native_modules: NativeModuleLoader,
 ) -> None:
     module = native_modules("configuration_neo_chat")
-    config = module._build_llm_config(  # noqa: leading-underscore -- existing native model or backend API
+    config = module.build_llm_config(
         {"num_experts": 4, "num_experts_per_tok": 2, "moe_intermediate_size": 32}
     )
     assert isinstance(config, module.NEOMoELLMConfig)
     assert config.num_experts == 4
-    assert not module._is_moe_llm_config(
-        {"num_experts": 1}
-    )  # noqa: leading-underscore -- existing native model or backend API
+    assert not module.is_moe_llm_config({"num_experts": 1})
 
 
 def test_model_input_compat_is_available_on_installed_transformers(
@@ -321,10 +319,8 @@ def test_interleaved_images_advance_sizes_and_stop_at_limit(
     model.system_message = ""
     model.patch_size = 1
     model.downsample_ratio = 1.0
-    model._build_t2i_query.return_value = (
-        ""  # noqa: leading-underscore -- existing native model or backend API
-    )
-    model._build_it2i_inputs.return_value = (  # noqa: leading-underscore -- existing native model or backend API
+    model.build_t2i_query.return_value = ""
+    model.build_it2i_inputs.return_value = (
         torch.zeros(1, 1, 2),
         torch.zeros(3, 1, dtype=torch.long),
         None,

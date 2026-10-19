@@ -155,5 +155,7 @@ def test_partial_batch_failure_reports_each_request_outcome() -> None:
             outcomes[message.request_id] = message.data["outcome"]
         elif message.type in ("result", "error"):
             results[message.request_id] = message.type
+        else:
+            pass
     assert results == {"good": "result", "bad": "error"}
     assert outcomes == {"good": "completed", "bad": "error"}

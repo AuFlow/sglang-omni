@@ -74,7 +74,7 @@ except ImportError:
 
 
 @lru_cache(maxsize=None)
-def _parameter_names(  # noqa: leading-underscore -- existing native model or backend API
+def parameter_names(
     mask_factory: CausalMaskFactory | LegacyCausalMaskFactory,
 ) -> frozenset[str]:
     return frozenset(inspect.signature(mask_factory).parameters)
@@ -91,9 +91,7 @@ def causal_mask_kwargs(
     position_ids: torch.Tensor,
 ) -> dict[str, PretrainedConfig | torch.Tensor | Cache | None]:
     """Build arguments accepted by the installed create_causal_mask."""
-    parameters = _parameter_names(
-        mask_factory
-    )  # noqa: leading-underscore -- existing native model or backend API
+    parameters = parameter_names(mask_factory)
     embedding_parameter = (
         "inputs_embeds" if "inputs_embeds" in parameters else "input_embeds"
     )

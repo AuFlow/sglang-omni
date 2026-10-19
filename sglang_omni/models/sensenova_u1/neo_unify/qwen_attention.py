@@ -184,8 +184,9 @@ class Qwen3Attention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert (
-            self.config._attn_implementation == "eager"
-        )  # noqa: leading-underscore -- existing native model or backend API
+            self.config._attn_implementation
+            == "eager"  # noqa: leading-underscore -- Transformers attention backend field
+        )
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -241,10 +242,11 @@ class Qwen3Attention(nn.Module):
 
         attention_interface: AttentionForward = eager_attention_forward
         if (
-            self.config._attn_implementation != "eager"
-        ):  # noqa: leading-underscore -- existing native model or backend API
+            self.config._attn_implementation
+            != "eager"  # noqa: leading-underscore -- Transformers attention backend field
+        ):
             attention_interface = ALL_ATTENTION_FUNCTIONS[
-                self.config._attn_implementation  # noqa: leading-underscore -- existing native model or backend API
+                self.config._attn_implementation  # noqa: leading-underscore -- Transformers attention backend field
             ]
         else:
             pass

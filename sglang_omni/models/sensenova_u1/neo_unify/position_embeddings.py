@@ -157,11 +157,11 @@ class PositionEmbedding(nn.Module):
         self.pos_embed: nn.Parameter = nn.Parameter(
             torch.zeros(max_num_patch_per_side**2, hidden_size), requires_grad=False
         )
-        self._init_weights()  # noqa: leading-underscore -- existing native model or backend API
+        self.initialize_position_embeddings()
 
-    def _init_weights(
+    def initialize_position_embeddings(
         self,
-    ) -> None:  # noqa: leading-underscore -- existing native model or backend API
+    ) -> None:
         pos_embed = get_2d_sincos_pos_embed(
             self.hidden_size, self.max_num_patch_per_side
         )

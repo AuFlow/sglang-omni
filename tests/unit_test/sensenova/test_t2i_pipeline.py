@@ -92,18 +92,14 @@ def test_i2i_model_counts_preprocessed_reference_tokens(
 ) -> None:
     model = Mock(
         spec=NEOChatModel,
-        _sensenova_compact_mode=False,
+        sensenova_compact_mode=False,
         device=torch.device("cpu"),
         patch_size=16,
         downsample_ratio=downsample_ratio,
         config=Mock(),
     )
-    model._build_t2i_query.return_value = "<image>" * len(
-        reference_sizes
-    )  # noqa: leading-underscore -- existing native model or backend API
-    model._build_it2i_inputs.side_effect = RuntimeError(
-        "Stop before model inference"
-    )  # noqa: leading-underscore -- existing native model or backend API
+    model.build_t2i_query.return_value = "<image>" * len(reference_sizes)
+    model.build_it2i_inputs.side_effect = RuntimeError("Stop before model inference")
     token_usage: dict[str, int] = {}
 
     with pytest.raises(RuntimeError, match="Stop before model inference"):
@@ -118,9 +114,7 @@ def test_i2i_model_counts_preprocessed_reference_tokens(
         )
 
     assert token_usage == {"image_tokens": expected_image_tokens}
-    query = model._build_it2i_inputs.call_args.args[
-        1
-    ]  # noqa: leading-underscore -- existing native model or backend API
+    query = model.build_it2i_inputs.call_args.args[1]
     assert query.count("<IMG_CONTEXT>") == expected_image_tokens
     assert "<image>" not in query
 

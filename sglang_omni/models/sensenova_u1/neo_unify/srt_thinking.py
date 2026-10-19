@@ -120,9 +120,7 @@ def try_import_srt_text_prefix(
 ) -> tuple[DynamicCache | None, PrefixTimings]:
     token_ids = input_ids[0, : int(prefix_length)].tolist()
     try:
-        return self._import_srt_prefix_tokens(
-            thinking_backend, token_ids
-        )  # noqa: leading-underscore -- existing native model or backend API
+        return self.import_srt_prefix_tokens(thinking_backend, token_ids)
     except Exception as exc:
         logger.warning(
             f"SenseNova SRT {name} KV transfer failed; running the native prefix: {exc}"
@@ -142,11 +140,9 @@ def try_import_srt_text_prefix_batch(
     lengths = [int(length) for length in prefix_lengths.tolist()]
     try:
         for index, length in enumerate(lengths):
-            cache, row_timings = (
-                self._import_srt_prefix_tokens(  # noqa: leading-underscore -- existing native model or backend API
-                    thinking_backend,
-                    input_ids[index, :length].tolist(),
-                )
+            cache, row_timings = self.import_srt_prefix_tokens(
+                thinking_backend,
+                input_ids[index, :length].tolist(),
             )
             caches.append(cache)
             timings.append(row_timings)
@@ -262,12 +258,10 @@ def replay_srt_think_prefix(
             caches = []
             transfer_timings = []
             for row, context in zip(replay_rows, transfer_contexts):
-                row_cache, row_timings = (
-                    self._import_srt_prefix_tokens(  # noqa: leading-underscore -- existing native model or backend API
-                        thinking_backend,
-                        row.tolist(),
-                        context,
-                    )
+                row_cache, row_timings = self.import_srt_prefix_tokens(
+                    thinking_backend,
+                    row.tolist(),
+                    context,
                 )
                 caches.append(row_cache)
                 transfer_timings.append(row_timings)
@@ -304,10 +298,8 @@ def replay_srt_think_prefix(
             )
         else:
             pass
-        cache, hidden_states = (
-            self._t2i_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
-                replay_ids, indexes, attention_mask
-            )
+        cache, hidden_states = self.t2i_prefix_forward(
+            replay_ids, indexes, attention_mask
         )
     else:
         pass
@@ -316,11 +308,3 @@ def replay_srt_think_prefix(
     else:
         pass
     return cache, hidden_states, indexes, key_valid_mask, replay_lengths
-
-
-# note (Codex): Preserve existing import and serialized class lookup names.
-_import_srt_prefix_tokens = import_srt_prefix_tokens  # noqa: leading-underscore -- existing native model or backend API
-_replay_srt_think_prefix = replay_srt_think_prefix
-_request_srt_think_tokens = request_srt_think_tokens
-_try_import_srt_text_prefix = try_import_srt_text_prefix
-_try_import_srt_text_prefix_batch = try_import_srt_text_prefix_batch
