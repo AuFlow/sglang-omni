@@ -325,6 +325,11 @@ preservation of 400/503 rejection statuses. Their local CPU run loads the real
 SGLang utility module without the GPU-dependent package initializer; this does
 not validate a complete installed service.
 
+For serving metrics, pass `--enable-metrics`; `/metrics` is disabled by
+default. The UMM image count appears as
+`sglang_omni:generated_images_total` with the usage segment's `stage_name`
+label.
+
 The Gloo suite covers TP collectives and asymmetric cancellation followed by a
 successful request on the same process group. It does not validate NCCL/HCCL
 cancellation during model inference.

@@ -62,7 +62,13 @@ All of these returned HTTP 200 with valid PNG and `image_usage`:
 Artifacts on the remote host: `/workspace/t2i.png`, `/workspace/i2i.png`,
 `/workspace/t2i_n2_0.png`, `/workspace/t2i_n2_1.png`,
 `/workspace/t2i_1024.png`. Server log: `/workspace/sensenova-server.log`.
-The `/metrics` path returns 404 in this serving configuration.
+
+`/metrics` is disabled by default. Restarting with `--enable-metrics` makes
+it return 200, and after one T2I request it reports:
+
+```text
+sglang_omni:generated_images_total{model_name=...,stage="generate"} 1.0
+```
 
 ## Fixes found remotely
 
@@ -79,4 +85,3 @@ The `/metrics` path returns 404 in this serving configuration.
 - NPU FIA/RMSNorm/SwiGLU/fused RoPE and I2I: no Ascend NPU.
 - Phase 3 batching, TP/DP, Cache-DiT, offload lifecycle, cancellation, and
   baseline image comparison at scale.
-- Metrics endpoint validation: `/metrics` returns 404 here.
