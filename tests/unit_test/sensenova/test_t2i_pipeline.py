@@ -675,6 +675,36 @@ def test_image_edit_api_accepts_one_reference_image():
     assert image.size == (64, 32)
 
 
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False)])
+def test_image_edit_api_parses_cache_flag(raw, expected):
+    class CacheFlagClient:
+        async def generate(self, request, request_id):
+            assert request.extra_params["enable_cache_dit"] is expected
+            buffer = io.BytesIO()
+            Image.new("RGB", (32, 32), (0, 0, 255)).save(buffer, format="PNG")
+            yield GenerateChunk(
+                request_id=request_id,
+                image_b64=base64.b64encode(buffer.getvalue()).decode("ascii"),
+            )
+
+    app = create_app(
+        CacheFlagClient(),
+        model_name="sensenova",
+        architectures=["NEOChatModel"],
+    )
+    client = TestClient(app)
+    reference = io.BytesIO()
+    Image.new("RGB", (16, 8), (255, 0, 0)).save(reference, format="PNG")
+
+    response = client.post(
+        "/v1/images/edits",
+        files={"image": ("reference.png", reference.getvalue(), "image/png")},
+        data={"prompt": "edit this", "enable_cache_dit": raw},
+    )
+
+    assert response.status_code == 200
+
+
 def test_image_edit_api_uses_sglang_defaults_when_omitted():
     app = create_app(
         DefaultImageEditClient(),
