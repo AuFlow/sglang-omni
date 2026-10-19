@@ -1,7 +1,7 @@
 # SenseNova Remote Test Report
 
 Date: 2026-10-19. Host: single RTX 4090. The host has the full SGLang stack
-but no SenseNova checkpoint and no Ascend NPU.
+and a SenseNova-U1.5-8B-MoT checkpoint; it has no Ascend NPU.
 
 Environment:
 
@@ -34,6 +34,36 @@ All 10 pipeline failures reproduce at baseline `cd4b310fa`. Two of the three
 serve failures reproduce at baseline; the health test passes when rerun alone
 and is timing-flaky. No UMM/SenseNova-specific regression was observed.
 
+## End-to-end serving
+
+Checkpoint: `/workspace/model/SenseNova-U1.5-8B-MoT`. Served through the
+UMM-default config with layerwise offload:
+
+```text
+dit_layerwise_offload=true
+dit_layerwise_resident_layers=8
+dit_offload_prefetch_size=2
+orchestrator timeout_s=1800
+```
+
+The first attempt with `resident_layers=0` exceeded the default 600 s deadline
+before completing a 512x512, 10-step request. Keeping 8 DiT layers resident
+brought 512x512 4-step requests to completion in roughly tens of seconds.
+
+All of these returned HTTP 200 with valid PNG and `image_usage`:
+
+| Case | Result | Usage |
+| --- | --- | --- |
+| T2I 512x512, 4 steps | 326708-byte PNG | text_tokens=12, image_count=1, 512x512 |
+| T2I 512x512, n=2, 4 steps | 2 PNGs | text_tokens=9, image_count=2, 512x512 |
+| I2I 512x512, 4 steps | 314162-byte PNG | text_tokens=10, image_tokens=4096, image_count=1 |
+| T2I 1024x1024, 4 steps | 892748-byte PNG | text_tokens=12, image_count=1, 1024x1024 |
+
+Artifacts on the remote host: `/workspace/t2i.png`, `/workspace/i2i.png`,
+`/workspace/t2i_n2_0.png`, `/workspace/t2i_n2_1.png`,
+`/workspace/t2i_1024.png`. Server log: `/workspace/sensenova-server.log`.
+The `/metrics` path returns 404 in this serving configuration.
+
 ## Fixes found remotely
 
 - FastAPI 0.147 parsed an omitted optional boolean form field as `False`; the
@@ -46,6 +76,7 @@ and is timing-flaky. No UMM/SenseNova-specific regression was observed.
 
 ## Not run
 
-- Real T2I/I2I inference: no SenseNova checkpoint on the host.
-- NPU FIA/RMSNorm/SwiGLU/fused RoPE and I2I: no NPU.
-- Phase 3 performance, cancellation, and baseline image comparison.
+- NPU FIA/RMSNorm/SwiGLU/fused RoPE and I2I: no Ascend NPU.
+- Phase 3 batching, TP/DP, Cache-DiT, offload lifecycle, cancellation, and
+  baseline image comparison at scale.
+- Metrics endpoint validation: `/metrics` returns 404 here.
