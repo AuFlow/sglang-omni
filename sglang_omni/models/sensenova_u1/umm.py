@@ -4,14 +4,18 @@
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict
 
 from sglang_omni.client.image_media import InlineImage, parse_image_usage
 from sglang_omni.client.types import ImageUsageDict
 from sglang_omni.models.sensenova_u1.admission import (
     ADMISSION_METADATA_KEY,
+    DEFAULT_UMM_ADMISSION_LIMITS,
     SenseNovaAdmissionLimits,
     validate_admission,
+)
+from sglang_omni.models.sensenova_u1.cancellation import (
+    SENSENOVA_DEADLINE_METADATA_KEY,
 )
 from sglang_omni.pipeline.umm import (
     CloseReason,
@@ -39,9 +43,11 @@ class SenseNovaExecution:
 
 
 class SenseNovaUMMAdapter:
-    def __init__(self, model_path: str, *, limits: dict[str, JsonValue]) -> None:
+    def __init__(self, model_path: str) -> None:
         """The shared factory supplies model_path; the generation stage loads it."""
-        self.limits = SenseNovaAdmissionLimits.model_validate(limits)
+        self.limits: SenseNovaAdmissionLimits = DEFAULT_UMM_ADMISSION_LIMITS.model_copy(
+            deep=True
+        )
         self.executions: dict[str, SenseNovaExecution] = {}
 
     def start(self, context: UMMContext) -> UMMStep:
@@ -59,6 +65,7 @@ class SenseNovaUMMAdapter:
             metadata={
                 **context.request.metadata,
                 ADMISSION_METADATA_KEY: self.limits.model_dump(),
+                SENSENOVA_DEADLINE_METADATA_KEY: context.deadline,
             },
         )
         return UMMStep(phase="generate", request=request)
@@ -79,16 +86,22 @@ class SenseNovaUMMAdapter:
         else:
             pass
         execution.reserved_output_bytes = 0
-        image_usage = parse_image_usage(generation.image_usage)
-        return UMMStep(
-            outputs=tuple(
-                UMMOutput("image", InlineImage.from_png(encoded_image).model_dump())
-                for encoded_image in images
-            ),
-            completion_metadata=(
-                {"image_usage": image_usage} if image_usage is not None else None
-            ),
+        outputs = tuple(
+            UMMOutput("image", InlineImage.from_png(encoded_image).model_dump())
+            for encoded_image in images
         )
+        image_usage = parse_image_usage(generation.image_usage)
+        if image_usage is not None:
+            outputs = (
+                *outputs,
+                UMMOutput(
+                    "usage",
+                    {"image_usage": image_usage, "stage_name": "generate"},
+                ),
+            )
+        else:
+            pass
+        return UMMStep(outputs=outputs)
 
     def usage(self, context: UMMContext) -> int:
         execution = self.executions.get(context.execution_id)

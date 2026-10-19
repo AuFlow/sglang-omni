@@ -47,6 +47,7 @@ from sglang_omni.models.sensenova_u1.sampling import (
     resolve_cache_dit_defaults,
 )
 from sglang_omni.models.sensenova_u1.tensor_parallel import (
+    SenseNovaTensorParallelScheduler,
     apply_tensor_parallel,
     initialize_tp,
     validate_tp_device,
@@ -296,13 +297,17 @@ def create_generation_executor(
                 pass
 
     if tp_size > 1:
-        scheduler = TensorParallelScheduler(
+        scheduler_class = (
+            SenseNovaTensorParallelScheduler
+            if cooperative_cancellation
+            else TensorParallelScheduler
+        )
+        scheduler = scheduler_class(
             _generate,
             validate_request=lambda payload: validate_generation_request(
                 payload, model
             ),
             shutdown_callback=_shutdown,
-            cooperative_cancellation=cooperative_cancellation,
         )
         return scheduler
     else:

@@ -3,12 +3,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
+
+from sglang_omni.models.sensenova_u1.cancellation import SenseNovaCancelledError
+from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
 
 SUPPORTED_TP_SIZES: tuple[int, ...] = (1, 2, 4, 8)
 TP_INITIALIZATION_TIMEOUT_MINUTES: int = 10
@@ -238,3 +244,29 @@ def synchronize_tp_noise(model: nn.Module, noise: torch.Tensor) -> None:
         dist.broadcast(noise, src=0, group=model.sensenova_tp_group)
     else:
         pass
+
+
+class SenseNovaTensorParallelScheduler(TensorParallelScheduler):
+    """Stop TP generation at SenseNova checkpoints without breaking collectives."""
+
+    def abort(self, request_id: str) -> None:
+        SimpleScheduler.abort(self, request_id)
+
+    def consume_if_aborted(self, request_id: str) -> bool:
+        return False
+
+    def run_single(
+        self, message: IncomingMessage, loop: asyncio.AbstractEventLoop
+    ) -> None:
+        try:
+            SimpleScheduler.run_single(self, message, loop)
+        except SenseNovaCancelledError as error:
+            self.emit_error(message.request_id, error, self.outbox)
+        except Exception as error:
+            # note (AuFlow): A failed rank must not reuse collectives for the next request.
+            self.compute_error = error
+            self.running = False
+            raise
+        finally:
+            with self.abort_lock:
+                self.aborted.discard(message.request_id)

@@ -43,7 +43,6 @@ CONTINUATION_METADATA_KEY = "omni_continuation"
 # A phase result reports context it produced under this data key, and the
 # consuming phase finds it under this request metadata key.
 CONTEXT_KEY = "umm_context"
-UMM_DEADLINE_METADATA_KEY = "umm_deadline_monotonic_s"
 CONTROLLER_FACTORY_PATH = f"{__name__}.create_umm_controller"
 OUTPUT_FACTORY_PATH = f"{__name__}.create_umm_output_stage"
 ROUTE_FN_PATH = f"{__name__}.route_umm"
@@ -107,7 +106,6 @@ class UMMStep:
     outputs: tuple[UMMOutput, ...] = ()
     context: ContextRef | None = None
     dispatches: tuple[UMMDispatch, ...] = ()
-    completion_metadata: dict[str, JSONValue] | None = None
 
 
 def limit_problems(limits: Mapping[str, object]) -> list[str]:
@@ -296,10 +294,7 @@ class UMMController(
         return True
 
     def forget(self, request_id: str) -> None:
-        with self.lock:
-            context = self.contexts.get(request_id)
-            expired = context is not None and self.clock() >= context.deadline
-        self.release(request_id, "expired" if expired else "aborted")
+        self.release(request_id, "aborted")
 
     def forget_all(self) -> None:
         with self.lock:
@@ -551,26 +546,8 @@ class UMMController(
             raise self.budget_error("max_outputs", limits.max_outputs, client=client)
         else:
             pass
-        completion_metadata = step.completion_metadata
-        if completion_metadata is not None and (
-            step.phase is not None or step.dispatches or context.expected
-        ):
-            raise ValueError("Completion metadata belongs to the completing UMM step")
-        else:
-            pass
-        metadata_bytes = (
-            len(
-                json.dumps(
-                    completion_metadata, ensure_ascii=False, allow_nan=False
-                ).encode("utf-8")
-            )
-            if completion_metadata is not None
-            else 0
-        )
-        retained = (
-            metadata_bytes
-            + context.output_bytes
-            + sum(encoded_bytes(output) for output in step.outputs)
+        retained = context.output_bytes + sum(
+            encoded_bytes(output) for output in step.outputs
         )
         state_bytes = self.adapter.usage(context)
         if type(state_bytes) is not int or state_bytes < 0:
@@ -665,10 +642,6 @@ class UMMController(
                 ],
                 "finish_reason": "stop",
             }
-            if completion_metadata is not None:
-                result["metadata"] = completion_metadata
-            else:
-                pass
             return StagePayload(request_id, request, result), added, {}
         else:
             pass
@@ -686,7 +659,6 @@ class UMMController(
             metadata = {
                 **dispatch.request.metadata,
                 CONTINUATION_METADATA_KEY: continuation,
-                UMM_DEADLINE_METADATA_KEY: context.deadline,
             }
             if dispatch.context is not None:
                 metadata[CONTEXT_KEY] = dispatch.context
@@ -774,7 +746,6 @@ def create_umm_controller(
     max_retained_bytes: int,
     timeout_s: float,
     stage_name: str = "orchestrator",
-    adapter_options: dict[str, JSONValue] | None = None,
 ) -> UMMController:
     """Build the controller around the adapter of the model being served.
 
@@ -787,7 +758,7 @@ def create_umm_controller(
         raise TypeError(f"UMM adapter factory {adapter!r} is not callable")
     else:
         pass
-    model_adapter = adapter_factory(model_path, **(adapter_options or {}))
+    model_adapter = adapter_factory(model_path)
     if not isinstance(model_adapter, UMMAdapter):
         raise TypeError(f"{adapter!r} did not return a UMMAdapter")
     else:

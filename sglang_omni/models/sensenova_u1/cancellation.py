@@ -10,9 +10,14 @@ from typing import Protocol
 import torch
 import torch.distributed as distributed
 
-from sglang_omni.pipeline.umm import UMM_DEADLINE_METADATA_KEY
 from sglang_omni.proto.request import StagePayload
-from sglang_omni.scheduling.message import RequestCancelledError
+
+
+SENSENOVA_DEADLINE_METADATA_KEY = "sensenova_deadline_monotonic_s"
+
+
+class SenseNovaCancelledError(RuntimeError):
+    """Generation stopped at a safe checkpoint and the scheduler remains reusable."""
 
 
 class CancellationProbe(Protocol):
@@ -29,7 +34,9 @@ class GenerationScope:
     ) -> None:
         self.request_deadlines: dict[str, float] = {}
         for payload in payloads:
-            deadline = payload.request.metadata.get(UMM_DEADLINE_METADATA_KEY, math.inf)
+            deadline = payload.request.metadata.get(
+                SENSENOVA_DEADLINE_METADATA_KEY, math.inf
+            )
             if (
                 isinstance(deadline, bool)
                 or not isinstance(deadline, (int, float))
@@ -81,7 +88,7 @@ class GenerationScope:
         else:
             pass
         if cancelled:
-            raise RequestCancelledError("SenseNova generation cancelled or expired")
+            raise SenseNovaCancelledError("SenseNova generation cancelled or expired")
         else:
             pass
 

@@ -8,7 +8,7 @@ import threading
 from typing import Protocol
 
 from sglang_omni.proto.request import StagePayload
-from sglang_omni.scheduling.message import IncomingMessage, RequestCancelledError
+from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 
@@ -39,10 +39,8 @@ class TensorParallelScheduler(SimpleScheduler):
         *,
         validate_request: RequestValidator | None = None,
         shutdown_callback: ShutdownCallback | None = None,
-        cooperative_cancellation: bool = False,
     ) -> None:
         super().__init__(request_compute)
-        self.cooperative_cancellation = cooperative_cancellation
         self.validate_request: RequestValidator | None = validate_request
         self.wait_for_shutdown: bool = True
         self.shutdown_callback: ShutdownCallback | None = shutdown_callback
@@ -55,16 +53,8 @@ class TensorParallelScheduler(SimpleScheduler):
         self.failure_callback: FailureCallback | None = None
 
     def abort(self, request_id: str) -> None:
-        if self.cooperative_cancellation:
-            super().abort(request_id)
-        else:
-            pass
-
-    def consume_if_aborted(self, request_id: str) -> bool:
-        if self.cooperative_cancellation:
-            return False
-        else:
-            return super().consume_if_aborted(request_id)
+        # note (AuFlow): Stage suppresses cancelled results; ranks must still run collectives.
+        pass
 
     def next_message(self) -> IncomingMessage | None:
         message = super().next_message()
@@ -107,24 +97,11 @@ class TensorParallelScheduler(SimpleScheduler):
     ) -> None:
         try:
             super().run_single(message, loop)
-        except RequestCancelledError as error:
-            if not self.cooperative_cancellation:
-                self.compute_error = error
-                self.running = False
-                raise
-            else:
-                self.emit_error(message.request_id, error, self.outbox)
         except Exception as exc:
             # note (AuFlow): A failed rank must not reuse collectives for the next request.
             self.compute_error = exc
             self.running = False
             raise
-        finally:
-            if self.cooperative_cancellation:
-                with self.abort_lock:
-                    self.aborted.discard(message.request_id)
-            else:
-                pass
 
     def stop(self) -> None:
         with self.stop_lock:

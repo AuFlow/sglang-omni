@@ -137,3 +137,13 @@ def validate_output_dimensions(request: OmniRequest, width: int, height: int) ->
         raise ValueError("SenseNova resolved output exceeds max_output_pixels")
     else:
         pass
+
+
+DEFAULT_UMM_ADMISSION_LIMITS = SenseNovaAdmissionLimits(
+    max_images=10,
+    max_output_pixels=10 * 2048 * 2048,
+    max_reference_pixels=32 * 1024 * 1024,
+    max_reference_images=8,
+    max_steps=100,
+    max_input_bytes=32 * 1024 * 1024,
+)

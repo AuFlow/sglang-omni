@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Single-stage native image generation pipeline for SenseNova-U1.5."""
+"""Shared UMM image generation pipeline for SenseNova-U1.5."""
 
 from __future__ import annotations
 
@@ -7,11 +7,19 @@ from typing import Annotated, ClassVar, Literal
 
 from pydantic import Field
 
+from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.config.schema import (
     FactoryArgs,
     FactoryDefault,
-    PipelineConfig,
     StageConfig,
+)
+from sglang_omni.models.sensenova_u1.admission import DEFAULT_UMM_ADMISSION_LIMITS
+from sglang_omni.pipeline.umm import (
+    CONTROLLER_FACTORY_PATH,
+    OUTPUT_FACTORY_PATH,
+    ROUTE_FN_PATH,
+    STREAM_DONE_FN_PATH,
+    UMMPipelineConfig,
 )
 
 DEFAULT_GENERATION_DTYPE = "bfloat16"
@@ -44,15 +52,33 @@ class SenseNovaGenerationStageConfig(StageConfig):
     )
 
 
-class SenseNovaU1PipelineConfig(PipelineConfig):
+class SenseNovaU1PipelineConfig(UMMPipelineConfig):
     architecture: ClassVar[str] = "NEOChatModel"
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "generate": SenseNovaGenerationStageConfig,
     }
 
     model_path: str
-    entry_stage: str = "generate"
+    entry_stage: str = "orchestrator"
     stages: list[StageConfig] = [  # noqa: RUF012 -- Pydantic model default
+        StageConfig(
+            name="orchestrator",
+            process="orchestrator",
+            factory_path=CONTROLLER_FACTORY_PATH,
+            factory=FactoryArgs(
+                adapter="sglang_omni.models.sensenova_u1.umm.SenseNovaUMMAdapter",
+                phases={"generate": "generate"},
+                max_dispatches=1,
+                max_outputs=11,
+                max_active=8,
+                max_retained_bytes=256 * 1024 * 1024,
+                timeout_s=600.0,
+            ),
+            next=["generate", "output"],
+            route_fn=ROUTE_FN_PATH,
+            stream_to=["output"],
+            stream_done_to_fn=STREAM_DONE_FN_PATH,
+        ),
         SenseNovaGenerationStageConfig(
             name="generate",
             process="sensenova_generate",
@@ -61,10 +87,18 @@ class SenseNovaU1PipelineConfig(PipelineConfig):
                 dtype=DEFAULT_GENERATION_DTYPE,
                 dit_layerwise_offload=DEFAULT_LAYERWISE_OFFLOAD,
                 enable_cache_dit=False,
+                cooperative_cancellation=True,
             ),
             gpu=0,
+            next="orchestrator",
+        ),
+        StageConfig(
+            name="output",
+            process="orchestrator",
+            factory_path=OUTPUT_FACTORY_PATH,
             terminal=True,
-        )
+            can_accept_stream_before_payload=True,
+        ),
     ]
 
     def model_post_init(self, __context: object = None, /) -> None:
@@ -76,6 +110,17 @@ class SenseNovaU1PipelineConfig(PipelineConfig):
             pass
         if generate.tp_size > 1 and (generate.factory.max_batch_size or 1) != 1:
             raise ValueError("SenseNova TP requires max_batch_size=1")
+        else:
+            pass
+
+        controller = resolve_stage_typed_kwargs(self.stage_named("orchestrator"))
+        limits = DEFAULT_UMM_ADMISSION_LIMITS
+        if controller["max_outputs"] < limits.max_images + 1:
+            raise ValueError(
+                "orchestrator.max_outputs must cover max_images plus usage segment"
+            )
+        elif not generate.factory.cooperative_cancellation:
+            raise ValueError("SenseNova UMM requires cooperative_cancellation")
         else:
             pass
 

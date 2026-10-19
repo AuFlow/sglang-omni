@@ -13,10 +13,6 @@ IncomingMessageType = Literal[
 ]
 
 
-class RequestCancelledError(RuntimeError):
-    """Compute stopped at a safe boundary; its scheduler remains reusable."""
-
-
 @dataclass
 class IncomingMessage:
     request_id: str
@@ -27,9 +23,7 @@ class IncomingMessage:
 @dataclass
 class OutgoingMessage:
     request_id: str
-    type: Literal[
-        "result", "stream", "error", "kv_transfer", "admitted", "wakeup", "metrics"
-    ]
+    type: Literal["result", "stream", "error", "kv_transfer", "admitted", "wakeup"]
     data: object = None
     target: str | None = None
     metadata: dict[str, object] | None = None
