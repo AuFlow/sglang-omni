@@ -329,4 +329,6 @@ GPU/NPU launch, baseline image comparison, batching throughput, TP/DP inference,
 Cache-DiT, offload, and business acceptance remain unexecuted for this UMM path.
 The existing pipeline's hardware results do not establish these properties for
 the new default configuration. Compare against commit `706053fa0` before
-production use, using the conditions and coverage listed above.
+production use, using the conditions and coverage listed above. A runnable
+checklist is in the
+[Phase 3 validation checklist](../design/sensenova_phase3_checklist.md).

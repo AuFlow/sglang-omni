@@ -549,7 +549,8 @@ controller，所以这些差异只影响 adapter/test 适配，不需要保留 b
 4. **性能**：至少测 UMM path 的 TP 每步 all-reduce 开销、batching 吞吐、首图延迟；
    没有测量就不要声称性能。
 5. **文档**：补 NPU fused RoPE 开关、UMM path 的 hardware/configuration 支持矩阵、
-   未验证组合列表。
+   未验证组合列表。可执行的验收步骤见
+   [sensenova_phase3_checklist.md](sensenova_phase3_checklist.md)。
 
 ### 6.4 最后拆 mainline PR
 
