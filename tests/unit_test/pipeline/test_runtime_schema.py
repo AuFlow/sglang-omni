@@ -225,15 +225,16 @@ def test_sensenova_factory_override_precedence(
 ) -> None:
     config = AuthorConfiguredSenseNova(model_path="model")
     stage = config.stage_named("generate")
+    cooperative = {"cooperative_cancellation": True}
     if selection == "omitted":
-        stage.factory = SenseNovaGenerationFactoryArgs()
+        stage.factory = SenseNovaGenerationFactoryArgs(**cooperative)
     elif selection == "none":
         stage.factory = SenseNovaGenerationFactoryArgs.model_validate(
-            {field_name: None}
+            {**cooperative, field_name: None}
         )
     else:
         stage.factory = SenseNovaGenerationFactoryArgs.model_validate(
-            {field_name: explicit_value}
+            {**cooperative, field_name: explicit_value}
         )
     if round_trip:
         config = AuthorConfiguredSenseNova.model_validate(config.model_dump())
