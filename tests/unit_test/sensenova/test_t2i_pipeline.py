@@ -3,6 +3,7 @@ import asyncio
 import base64
 import io
 import json
+from collections.abc import AsyncIterator
 from unittest.mock import Mock, create_autospec
 
 import pytest
@@ -12,7 +13,7 @@ from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
 from sglang_omni.client.client import Client
-from sglang_omni.client.types import GenerateChunk
+from sglang_omni.client.types import GenerateChunk, GenerateRequest
 from sglang_omni.config import FactoryArgs, ProcessConfig
 from sglang_omni.config.manager import resolve_config_cls_for_model_path
 from sglang_omni.config.topology import compile_logical_processes
@@ -678,7 +679,9 @@ def test_image_edit_api_accepts_one_reference_image():
 @pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False)])
 def test_image_edit_api_parses_cache_flag(raw: str, expected: bool) -> None:
     class CacheFlagClient:
-        async def generate(self, request, request_id):
+        async def generate(
+            self, request: GenerateRequest, request_id: str
+        ) -> AsyncIterator[GenerateChunk]:
             assert request.extra_params["enable_cache_dit"] is expected
             buffer = io.BytesIO()
             Image.new("RGB", (32, 32), (0, 0, 255)).save(buffer, format="PNG")
