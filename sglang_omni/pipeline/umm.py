@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Interleaved (UMM) requests on the existing stage graph.
 
-A UMM request alternates between model phases, such as understanding,
-generation, and inspection of the generated media, until its adapter
+A UMM request runs model phases, such as understanding, generation, and
+inspection of the generated media, in turn or in parallel until its adapter
 completes it. The controller is the scheduler of the entry stage, whose
 route_fn sends each dispatched phase to the stage configuration maps it to.
 The completed request goes to a terminal output stage in the controller's
@@ -26,7 +26,7 @@ from sglang_omni.admission import QueueFullError
 from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
-from sglang_omni.proto.request import OmniRequest, StagePayload
+from sglang_omni.proto.request import OmniRequest, RoutedPayloads, StagePayload
 from sglang_omni.proto.session import SESSION_METADATA_KEY
 from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
@@ -85,16 +85,28 @@ class UMMOutput:
 
 
 @dataclass(frozen=True)
+class UMMDispatch:
+    """One phase a step starts, with its request and any engine context."""
+
+    phase: str
+    request: OmniRequest
+    context: ContextRef | None = None
+
+
+@dataclass(frozen=True)
 class UMMStep:
     """The adapter's choice after start and after every phase result.
 
-    phase None completes the request after publishing outputs.
+    A step starts the phase it names and every phase in dispatches, at most
+    one per phase stage of the request. A step that starts none publishes its
+    outputs and completes the request, or waits while phases of it run.
     """
 
     phase: str | None = None
     request: OmniRequest | None = None
     outputs: tuple[UMMOutput, ...] = ()
     context: ContextRef | None = None
+    dispatches: tuple[UMMDispatch, ...] = ()
     completion_metadata: dict[str, JSONValue] | None = None
 
 
@@ -152,7 +164,8 @@ class UMMContext:
     outputs: list[dict[str, JSONValue]] = field(default_factory=list)
     output_bytes: int = 0
     produced: ContextRef | None = None
-    expected: Continuation | None = None
+    # The continuation of the phase each stage runs for this request.
+    expected: dict[str, Continuation] = field(default_factory=dict)
     busy: bool = False
     closed: CloseReason | None = None
     shedding: bool = False
@@ -221,7 +234,9 @@ def encoded_bytes(output: UMMOutput) -> int:
         return len(encoded.encode("utf-8"))
 
 
-class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
+class UMMController(
+    SimpleScheduler[StagePayload, StagePayload | RoutedPayloads | None]
+):
     """Advance each request through adapter-chosen phases.
 
     Native stages keep compute, batching, caches, and engine context. This
@@ -378,10 +393,11 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
     @staticmethod
     def emit_result(
         request_id: str,
-        result: StagePayload | None,
+        result: StagePayload | RoutedPayloads | None,
         outbox: queue.Queue[OutgoingMessage],
     ) -> None:
-        # None is a stale continuation or an already reported rejection.
+        # None is a stale continuation, an already reported rejection, or a
+        # request that waits for its running phases.
         if result is not None:
             SimpleScheduler.emit_result(request_id, result, outbox)
         else:
@@ -406,7 +422,7 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         self.contexts[payload.request_id] = context
         return context
 
-    def advance(self, payload: StagePayload) -> StagePayload | None:
+    def advance(self, payload: StagePayload) -> StagePayload | RoutedPayloads | None:
         try:
             return self.transition(payload)
         except (QueueFullError, UMMRequestError) as exc:
@@ -414,7 +430,7 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
             self.emit_error(payload.request_id, exc, self.outbox)
             return None
 
-    def transition(self, payload: StagePayload) -> StagePayload | None:
+    def transition(self, payload: StagePayload) -> StagePayload | RoutedPayloads | None:
         request_id = payload.request_id
         token = payload.request.metadata.get(CONTINUATION_METADATA_KEY)
         if not isinstance(token, Continuation):
@@ -434,13 +450,13 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
             elif token is None:
                 self.contexts.pop(request_id)
                 lost = True
-            elif token != context.expected:
+            elif token != context.expected.get(token.stage):
                 # A duplicate or stale continuation never advances the request.
                 return None
             else:
                 phase = token.phase
+                del context.expected[token.stage]
             if not lost:
-                context.expected = None
                 context.busy = True
             else:
                 pass
@@ -462,7 +478,9 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
                     data.get(CONTEXT_KEY) if isinstance(data, Mapping) else None
                 )
                 step = self.adapter.advance(context, phase, data)
-            result, added = self.apply(request_id, context, step, client=phase is None)
+            result, added, started = self.apply(
+                request_id, context, step, client=phase is None
+            )
             self.check_deadline(context)
         except BaseException as exc:
             with self.lock:
@@ -479,10 +497,11 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         with self.lock:
             context.busy = False
             live = self.contexts.get(request_id) is context
-            if live and step.phase is None:
+            completed = live and not started and not context.expected
+            if completed:
                 self.contexts.pop(request_id)
             elif live:
-                context.expected = result.request.metadata[CONTINUATION_METADATA_KEY]
+                context.expected.update(started)
             else:
                 pass
         if not live:
@@ -504,7 +523,7 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
                 )
         else:
             pass
-        if step.phase is None:
+        if completed:
             self.close(context, "completed")
         else:
             pass
@@ -512,11 +531,18 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
 
     def apply(
         self, request_id: str, context: UMMContext, step: UMMStep, *, client: bool
-    ) -> tuple[StagePayload, list[dict[str, JSONValue]]]:
+    ) -> tuple[
+        StagePayload | RoutedPayloads | None,
+        list[dict[str, JSONValue]],
+        dict[str, Continuation],
+    ]:
         limits = self.limits
         if not isinstance(step, UMMStep):
             raise TypeError("UMM adapter must return a UMMStep")
-        elif context.produced is not None and step.context != context.produced:
+        else:
+            pass
+        offered = [step.context, *(dispatch.context for dispatch in step.dispatches)]
+        if context.produced is not None and context.produced not in offered:
             raise RuntimeError(
                 f"UMM adapter left context from stage {context.produced.owner!r} "
                 "unconsumed. Pass it to the next phase so its owner releases it"
@@ -526,7 +552,9 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         else:
             pass
         completion_metadata = step.completion_metadata
-        if completion_metadata is not None and step.phase is not None:
+        if completion_metadata is not None and (
+            step.phase is not None or step.dispatches or context.expected
+        ):
             raise ValueError("Completion metadata belongs to the completing UMM step")
         else:
             pass
@@ -554,22 +582,39 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         elif step.phase is None and (
             step.request is not None or step.context is not None
         ):
-            raise ValueError("A completing UMM step dispatches no request")
-        elif step.phase is None:
-            stage = self.output_stage
-        elif step.request is None:
-            raise ValueError(f"UMM step for phase {step.phase!r} has no request")
-        elif context.remaining_dispatches <= 0:
-            raise self.budget_error(
-                "max_dispatches", limits.max_dispatches, client=False
-            )
-        elif step.phase not in self.phases:
-            raise ValueError(
-                f"UMM adapter chose unmapped phase {step.phase!r}. "
-                f"Map it in {self.factory_prefix}.phases"
-            )
+            raise ValueError("A UMM step without a phase takes no request or context")
         else:
-            stage = self.phases[step.phase]
+            pass
+        dispatches = (
+            (UMMDispatch(step.phase, step.request, step.context), *step.dispatches)
+            if step.phase is not None
+            else step.dispatches
+        )
+        stages: list[str] = []
+        for dispatch in dispatches:
+            if dispatch.request is None:
+                raise ValueError(
+                    f"UMM step for phase {dispatch.phase!r} has no request"
+                )
+            elif len(stages) >= context.remaining_dispatches:
+                raise self.budget_error(
+                    "max_dispatches", limits.max_dispatches, client=False
+                )
+            elif dispatch.phase not in self.phases:
+                raise ValueError(
+                    f"UMM adapter chose unmapped phase {dispatch.phase!r}. "
+                    f"Map it in {self.factory_prefix}.phases"
+                )
+            elif self.phases[dispatch.phase] in (*context.expected, *stages):
+                # A stage keys its request state by request id.
+                raise ValueError(
+                    f"UMM adapter dispatched phase {dispatch.phase!r} to stage "
+                    f"{self.phases[dispatch.phase]!r}, which already runs a phase "
+                    "of this request. Dispatch it once advance reports that "
+                    "stage's result"
+                )
+            else:
+                stages.append(self.phases[dispatch.phase])
         added: list[dict[str, JSONValue]] = [
             {
                 "type": "segment",
@@ -583,15 +628,18 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         context.outputs.extend(added)
         context.output_bytes = retained
         context.produced = None
-        continuation = Continuation(
-            execution_id=context.execution_id,
-            index=limits.max_dispatches - context.remaining_dispatches,
-            phase=step.phase,
-            stage=stage,
-            nonce=uuid.uuid4().hex,
-        )
-        if step.phase is None:
+        if not dispatches and context.expected:
+            # The request waits for the results of its running phases.
+            return None, added, {}
+        elif not dispatches:
             streamed = bool(context.request.params.get("stream", False))
+            continuation = Continuation(
+                execution_id=context.execution_id,
+                index=limits.max_dispatches - context.remaining_dispatches,
+                phase=None,
+                stage=self.output_stage,
+                nonce=uuid.uuid4().hex,
+            )
             request = replace(
                 context.request,
                 metadata={
@@ -621,26 +669,45 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
                 result["metadata"] = completion_metadata
             else:
                 pass
-            return StagePayload(request_id, request, result), added
+            return StagePayload(request_id, request, result), added, {}
         else:
             pass
-        context.remaining_dispatches -= 1
-        metadata = {
-            **step.request.metadata,
-            CONTINUATION_METADATA_KEY: continuation,
-            UMM_DEADLINE_METADATA_KEY: context.deadline,
-        }
-        if step.context is not None:
-            metadata[CONTEXT_KEY] = step.context
+        payloads: dict[str, StagePayload] = {}
+        started: dict[str, Continuation] = {}
+        for dispatch, stage in zip(dispatches, stages, strict=True):
+            continuation = Continuation(
+                execution_id=context.execution_id,
+                index=limits.max_dispatches - context.remaining_dispatches,
+                phase=dispatch.phase,
+                stage=stage,
+                nonce=uuid.uuid4().hex,
+            )
+            context.remaining_dispatches -= 1
+            metadata = {
+                **dispatch.request.metadata,
+                CONTINUATION_METADATA_KEY: continuation,
+                UMM_DEADLINE_METADATA_KEY: context.deadline,
+            }
+            if dispatch.context is not None:
+                metadata[CONTEXT_KEY] = dispatch.context
+            else:
+                pass
+            # Phases never stream. The controller publishes accepted outputs.
+            request = replace(
+                dispatch.request,
+                params={**dispatch.request.params, "stream": False},
+                metadata=metadata,
+            )
+            payloads[stage] = StagePayload(request_id, request, request.inputs)
+            started[stage] = continuation
+        if len(payloads) == 1 and not context.expected:
+            (result,) = payloads.values()
         else:
-            pass
-        # Phases never stream. The controller publishes accepted outputs.
-        request = replace(
-            step.request,
-            params={**step.request.params, "stream": False},
-            metadata=metadata,
-        )
-        return StagePayload(request_id, request, request.inputs), added
+            # One routing pass sends every payload with the request's replica
+            # bindings. Another running phase may return before the stage
+            # routes this result, so the stage keeps the request's state.
+            result = RoutedPayloads(payloads, keep_request_state=True)
+        return result, added, started
 
 
 class UMMOutputRelay:
@@ -744,8 +811,15 @@ def create_umm_output_stage() -> UMMOutputRelay:
     return UMMOutputRelay()
 
 
-def route_umm(request_id: str, payload: StagePayload) -> str:
-    """Send a controller output to the stage its continuation names."""
+def route_umm(
+    request_id: str, payload: StagePayload | RoutedPayloads
+) -> str | list[str]:
+    """Send a controller output to the stage its continuation names, or each
+    payload of a routed result to its own stage."""
+    if isinstance(payload, RoutedPayloads):
+        return list(payload.payloads)
+    else:
+        pass
     continuation = payload.request.metadata.get(CONTINUATION_METADATA_KEY)
     if not isinstance(continuation, Continuation):
         raise TypeError(f"UMM output for {request_id} carries no continuation")

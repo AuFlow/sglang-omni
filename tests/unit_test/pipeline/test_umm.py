@@ -9,6 +9,7 @@ import json
 import pickle
 import threading
 from dataclasses import replace
+from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -25,9 +26,12 @@ from sglang_omni.pipeline.umm import (
     OUTPUT_FACTORY_PATH,
     ROUTE_FN_PATH,
     STREAM_DONE_FN_PATH,
+    UMM_DEADLINE_METADATA_KEY,
     ContextRef,
     Continuation,
+    UMMContext,
     UMMController,
+    UMMDispatch,
     UMMLimits,
     UMMOutput,
     UMMPipelineConfig,
@@ -38,7 +42,7 @@ from sglang_omni.pipeline.umm import (
     umm_stream_done_targets,
 )
 from sglang_omni.proto import DataAckMessage, DataReadyMessage
-from sglang_omni.proto.request import OmniRequest, StagePayload
+from sglang_omni.proto.request import OmniRequest, RoutedPayloads, StagePayload
 from sglang_omni.proto.session import SESSION_METADATA_KEY
 from sglang_omni.relay.shm import ShmRelay
 from sglang_omni.scheduling.message import IncomingMessage
@@ -181,6 +185,24 @@ class SharedContextAdapter(Recorder):
         return UMMStep(
             "generate", OmniRequest({"cfg": 4.0}), think, context=result[CONTEXT_KEY]
         )
+
+
+class ParallelAdapter(Recorder):
+    """LLaDA2-Uni: an image decodes while the model keeps writing."""
+
+    def start(self, context):
+        return UMMStep(
+            dispatches=(
+                UMMDispatch("reason", OmniRequest({"think": True})),
+                UMMDispatch("generate", OmniRequest({"prompt": "a cat"})),
+            )
+        )
+
+    def advance(self, context, phase, result):
+        if phase == "reason":
+            return UMMStep(outputs=(UMMOutput("text", result["text"]),))
+        else:
+            return UMMStep(outputs=(UMMOutput("image", result["media"]),))
 
 
 def reasoner(decisions):
@@ -340,7 +362,7 @@ def test_stale_duplicate_forged_and_lost_continuations_never_advance():
     second = controller.advance(reply(first, generate("a cat")))
     assert controller.advance(reply(first, generate("again"))) is None
     expected = second.request.metadata[CONTINUATION_METADATA_KEY]
-    assert controller.contexts["req"].expected == expected
+    assert controller.contexts["req"].expected == {expected.stage: expected}
     rebuilt = StagePayload("req", OmniRequest(second.request.inputs), {"media": None})
     with pytest.raises(RuntimeError, match="lost its continuation"):
         controller.advance(rebuilt)
@@ -698,6 +720,32 @@ def real_stages(controller, relay, *, reasoner_script, generator_script):
     return stages, crossed
 
 
+def start_relay():
+    relay = create_umm_output_stage()
+
+    def serve():
+        # The stage warms its scheduler on the serving thread, then starts it.
+        relay.warm_up_serving_thread()
+        relay.start()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    return relay, thread
+
+
+async def stop_real_stages(stages, controller, relay, relay_thread):
+    controller.stop()
+    relay.stop()
+    relay_thread.join(timeout=2)
+    tasks = [task for obj in stages.values() for task in obj.comm.send_workers.values()]
+    for obj in stages.values():
+        await obj.comm.close()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    else:
+        pass
+
+
 async def run_real_stages(stages, controller, rid="req"):
     """Route through real Stage objects, the orchestrator through its outbox."""
 
@@ -748,15 +796,7 @@ async def test_real_stages_loop_over_relays_and_stream_through_the_output_stage(
             "timeout_s": 60.0,
         },
     )
-    relay = create_umm_output_stage()
-
-    def serve_relay():
-        # The stage warms its scheduler on the serving thread, then starts it.
-        relay.warm_up_serving_thread()
-        relay.start()
-
-    relay_thread = threading.Thread(target=serve_relay)
-    relay_thread.start()
+    relay, relay_thread = start_relay()
     stages, crossed = real_stages(
         controller,
         relay,
@@ -795,18 +835,80 @@ async def test_real_stages_loop_over_relays_and_stream_through_the_output_stage(
             assert not obj.active_requests and not obj.comm.pending
         assert not controller.contexts
     finally:
-        controller.stop()
-        relay.stop()
-        relay_thread.join(timeout=2)
-        tasks = [
-            task for obj in stages.values() for task in obj.comm.send_workers.values()
+        await stop_real_stages(stages, controller, relay, relay_thread)
+
+
+@pytest.mark.asyncio
+async def test_parallel_phases_leave_in_one_routing_pass_and_join_once():
+    adapter = ParallelAdapter()
+    controller = make_controller(adapter)
+    relay, relay_thread = start_relay()
+    stages, crossed = real_stages(
+        controller, relay, reasoner_script=[final("plan")], generator_script=[{}]
+    )
+    try:
+        stages["orchestrator"].active_requests.add("req")
+        await stages["orchestrator"].execute(initial(stream=True))
+        await run_real_stages(stages, controller)
+        output = stages["output"]
+        assert [c.success for c in output.control_plane.completions] == [True]
+        chunks = [
+            call.args[0].chunk for call in output.control_plane.send_stream.mock_calls
+        ]
+        assert [(c["segment_index"], c["kind"]) for c in chunks] == [
+            (0, "text"),
+            (1, "image"),
+        ]
+        assert crossed[:2] == [
+            ("orchestrator", "reasoner", True),
+            ("orchestrator", "generator", True),
         ]
         for obj in stages.values():
-            await obj.comm.close()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        else:
-            pass
+            assert not obj.active_requests and not obj.comm.pending
+        assert not controller.contexts and adapter.closed == ["completed"]
+    finally:
+        await stop_real_stages(stages, controller, relay, relay_thread)
+    adapter = ParallelAdapter()
+    controller = make_controller(adapter, {"reason": "solo", "generate": "solo"})
+    with pytest.raises(ValueError, match="already runs a phase"):
+        controller.advance(initial())
+    assert adapter.closed == ["failed"] and not controller.contexts
+
+
+@pytest.mark.asyncio
+async def test_phase_results_queued_together_both_leave_the_stage():
+    class Rewriter(ParallelAdapter):
+        """The first text starts another turn while the image still decodes."""
+
+        def advance(self, context, phase, result):
+            step = super().advance(context, phase, result)
+            if phase == "reason" and result["text"] == "plan":
+                turn = UMMDispatch("reason", OmniRequest({"think": True}))
+                return replace(step, dispatches=(turn,))
+            else:
+                return step
+
+    controller = make_controller(Rewriter())
+    orchestrator = make_stage(
+        name="orchestrator",
+        get_next=route_umm,
+        scheduler=controller,
+        stream_targets=["output"],
+        get_stream_done_targets=umm_stream_done_targets,
+    )
+    orchestrator.send_to_stage = AsyncMock()
+    orchestrator.send_stream_to_target = AsyncMock()
+    started = controller.advance(initial(stream=True))
+    # Both phase results reached the stage before either one is routed.
+    orchestrator.active_requests.add("req")
+    for phase, data in (("reasoner", {"text": "plan"}), ("generator", {"media": "a"})):
+        result = controller.advance(reply(started.payloads[phase], data))
+        controller.emit_result("req", result, controller.outbox)
+    orchestrator.end_outbox_drain()
+    await orchestrator.drain_outbox_external()
+    sent = orchestrator.send_stream_to_target.await_args_list
+    assert [call.args[1]["kind"] for call in sent] == ["text", "image"]
+    assert orchestrator.send_to_stage.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -869,3 +971,68 @@ async def test_waiting_controller_reports_its_deadline_through_its_stage(ending)
     assert list(controller.contexts) == ([] if ending == "deadline" else ["other"])
     with pytest.raises(RuntimeError, match="inactive request"):
         controller.advance(reply(dispatched, generate("late")))
+
+
+@pytest.mark.parametrize("metadata_step", ["dispatch", "waiting", "complete"])
+def test_parallel_completion_metadata_and_deadline(
+    metadata_step: Literal["dispatch", "waiting", "complete"],
+) -> None:
+    """Parallel work must retain deadlines and publish metadata only at completion."""
+
+    class CompletionAdapter(ParallelAdapter):
+        def start(self, context: UMMContext) -> UMMStep:
+            step = super().start(context)
+            return replace(
+                step,
+                completion_metadata=(
+                    {"trace": "done"} if metadata_step == "dispatch" else None
+                ),
+            )
+
+        def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
+            return UMMStep(
+                completion_metadata=(
+                    {"trace": "done"}
+                    if phase == "generate" or metadata_step == "waiting"
+                    else None
+                )
+            )
+
+    adapter = CompletionAdapter()
+    controller = UMMController(
+        adapter,
+        limits=UMMLimits(
+            max_dispatches=2,
+            max_outputs=2,
+            max_active=1,
+            max_retained_bytes=1024,
+            timeout_s=60,
+        ),
+        phases={"reason": "reasoner", "generate": "generator"},
+        output_stage="output",
+    )
+    initial_payload = StagePayload("request", OmniRequest("prompt"), None)
+    if metadata_step == "dispatch":
+        with pytest.raises(ValueError, match="completing UMM step"):
+            controller.transition(initial_payload)
+    else:
+        dispatched_payloads = controller.transition(initial_payload)
+        assert isinstance(dispatched_payloads, RoutedPayloads)
+        deadline_monotonic_s = controller.contexts["request"].deadline
+        assert all(
+            payload.request.metadata[UMM_DEADLINE_METADATA_KEY] == deadline_monotonic_s
+            for payload in dispatched_payloads.payloads.values()
+        )
+        reason_payload = dispatched_payloads.payloads["reasoner"]
+        if metadata_step == "waiting":
+            with pytest.raises(ValueError, match="completing UMM step"):
+                controller.transition(reason_payload)
+        else:
+            assert controller.transition(reason_payload) is None
+            completion_payload = controller.transition(
+                dispatched_payloads.payloads["generator"]
+            )
+            assert isinstance(completion_payload, StagePayload)
+            assert completion_payload.data["metadata"] == {"trace": "done"}
+    assert adapter.closed == ["completed" if metadata_step == "complete" else "failed"]
+    assert not controller.contexts
