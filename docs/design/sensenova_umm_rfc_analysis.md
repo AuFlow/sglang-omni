@@ -125,9 +125,9 @@ response、n>1、I2I、usage 和 400/503 rejection；为了绕开本地缺少完
 改动后，现有 CPU contract 仍然通过；这不代表“no-runtime”目标已经达成。
 
 实现阶段（2026-10-19）在本地 stub 环境下扩大回归到 T2I、multi-output、native module、
-denoise、TP/Gloo、Images API 和 metrics：**239 passed, 5 skipped, 43 subtests passed**。
+denoise、TP/Gloo、Images API 和 metrics：**241 passed, 5 skipped, 43 subtests passed**。
 真实 SGLang 环境（RTX 4090，torch 2.13.0，SGLang 0.5.21）跑
-`tests/unit_test/sensenova` 为 **223 passed, 1 failed, 43 subtests passed**；
+`tests/unit_test/sensenova` 为 **225 passed, 1 failed, 43 subtests passed**；
 唯一失败是 `test_native_tp` 的 bfloat16 case，在 `cd4b310fa` baseline 同样失败。
 `test_npu_adaptation.py` 仍需要真实 SGLang platform，`test_fused_rope.py` 的 NPU 分支在本
 地 stub 下不成立；这两组留给完整 CI/NPU 环境。
