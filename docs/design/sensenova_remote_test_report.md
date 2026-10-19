@@ -90,6 +90,30 @@ Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
   `timeout_s=1800`, a 4-step request returned HTTP 200.
 - TP/DP: not run, because the host exposes a single RTX 4090.
 
+## Baseline quality and offload lifecycle
+
+The pre-UMM baseline was launched from a detached worktree at `706053fa0`
+(native single-stage pipeline) on port 8001, with the same checkpoint and
+offload settings. T2I and I2I used the same prompt, seed, size, steps, and
+reference image as the current UMM runs.
+
+- T2I: MSE=0, PSNR=inf, SSIM=1.0 against the current UMM output.
+- I2I: MSE=0, PSNR=inf, SSIM=1.0 against the current UMM output.
+- Usage fields match: T2I text_tokens=12/image_count=1; I2I
+  text_tokens=10/image_tokens=4096/image_count=1.
+
+Layerwise offload lifecycle on the current server:
+
+```text
+after start                          ~8.9 GiB GPU
+after one 4-step request             ~11.6 GiB GPU
+after stop                           1 MiB GPU
+after restart                        ~8.9 GiB GPU
+request after restart                HTTP 200
+```
+
+No residual GPU memory was observed after shutdown.
+
 ## Fixes found remotely
 
 - FastAPI 0.147 parsed an omitted optional boolean form field as `False`; the
@@ -104,4 +128,5 @@ Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
 
 - NPU FIA/RMSNorm/SwiGLU/fused RoPE and I2I: no Ascend NPU.
 - TP/DP real multi-GPU inference: the host has one GPU.
-- Offload lifecycle and baseline image comparison at scale.
+- NPU execution: no Ascend NPU.
+- Baseline comparison at larger scale and other prompts/seeds.
