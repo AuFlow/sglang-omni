@@ -8,11 +8,14 @@ from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.pipeline.umm import (
     CONTINUATION_METADATA_KEY,
     Continuation,
+    UMMController,
     UMMOutputRelay,
     route_umm,
 )
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import IncomingMessage
+
+pytest_plugins = ["tests.unit_test.fixtures.sensenova_umm"]
 
 
 def test_route_umm_uses_the_continuation_stage() -> None:
@@ -52,3 +55,41 @@ def test_output_relay_forwards_stream_and_result() -> None:
     assert stream.metadata == {"modality": "image"}
     assert result.type == "result"
     assert result.data == {"type": "umm_result"}
+
+
+def test_controller_route_and_output_relay_end_to_end(
+    controller: UMMController, encoded_image: str
+) -> None:
+    dispatched = controller.transition(
+        StagePayload("request", OmniRequest("prompt"), None)
+    )
+    assert dispatched is not None
+    assert route_umm("request", dispatched) == "generate"
+    dispatched.data = {
+        "modality": "image",
+        "image_b64": encoded_image,
+        "image_usage": {"input_tokens": 3, "total_tokens": 3},
+    }
+    completed = controller.transition(dispatched)
+    assert completed is not None
+    assert route_umm("request", completed) == "output"
+    assert [segment["kind"] for segment in completed.data["segments"]] == [
+        "image",
+        "usage",
+    ]
+    assert not controller.contexts
+
+    relay = UMMOutputRelay()
+    relay.inbox.put(IncomingMessage("request", "new_request", completed.data))
+    thread = threading.Thread(target=relay.start)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2
+        while relay.outbox.empty() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        message = relay.outbox.get_nowait()
+    finally:
+        relay.stop()
+        thread.join(timeout=2)
+    assert message.type == "result"
+    assert message.data["segments"][1]["kind"] == "usage"
