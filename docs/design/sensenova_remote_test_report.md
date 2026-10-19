@@ -70,6 +70,26 @@ it return 200, and after one T2I request it reports:
 sglang_omni:generated_images_total{model_name=...,stage="generate"} 1.0
 ```
 
+## Batching, cache, cancellation, deadline
+
+Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
+`enable_cache_dit` per request, layerwise offload resident=8.
+
+- Batching: two concurrent 512x512/4-step requests produced
+  `SenseNova-U1 T2I batch: size=2, image_size=512x512, steps=4, cfg=4.0`;
+  both returned HTTP 200.
+- Cache-DiT: an 8-step request with `enable_cache_dit=true` returned HTTP 200.
+  The log shows `[Cache-DiT] ... Collected Context Config:
+  DBCache_F8B0_W8I1M0MC0_R0.08_N8_CFG1` and `Match Blocks ...
+  CachedBlocks_Pattern_3_4_5`.
+- Cancel/disconnect: a 50-step request with `curl -m 5` exited 28; the server
+  logged `asyncio.CancelledError`, remained healthy, and a following 4-step
+  request returned HTTP 200.
+- Deadline: with `timeout_s=15`, a 50-step request returned HTTP 500 with
+  `UMM request deadline exceeded after timeout_s=15`. After restoring
+  `timeout_s=1800`, a 4-step request returned HTTP 200.
+- TP/DP: not run, because the host exposes a single RTX 4090.
+
 ## Fixes found remotely
 
 - FastAPI 0.147 parsed an omitted optional boolean form field as `False`; the
@@ -83,5 +103,5 @@ sglang_omni:generated_images_total{model_name=...,stage="generate"} 1.0
 ## Not run
 
 - NPU FIA/RMSNorm/SwiGLU/fused RoPE and I2I: no Ascend NPU.
-- Phase 3 batching, TP/DP, Cache-DiT, offload lifecycle, cancellation, and
-  baseline image comparison at scale.
+- TP/DP real multi-GPU inference: the host has one GPU.
+- Offload lifecycle and baseline image comparison at scale.
