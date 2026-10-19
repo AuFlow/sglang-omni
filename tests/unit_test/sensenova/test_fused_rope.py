@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sglang_omni.models.sensenova_u1.neo_unify import modeling_qwen3
+from sglang_omni.models.sensenova_u1.neo_unify import modeling_qwen3, rotary_embeddings
 
 
 def inputs(device="cpu"):
@@ -39,9 +39,9 @@ def test_npu_rotary_mul_opt_in_uses_half_layout(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "torch_npu", SimpleNamespace(npu_rotary_mul=fake_rotary_mul)
     )
-    monkeypatch.setattr(modeling_qwen3, "SENSENOVA_NPU_ROTARY_MUL_DISABLED", False)
+    monkeypatch.setattr(rotary_embeddings, "SENSENOVA_NPU_ROTARY_MUL_DISABLED", False)
     monkeypatch.setattr(
-        modeling_qwen3, "_can_use_sensenova_npu_fused_rope", lambda *_: True
+        rotary_embeddings, "can_use_sensenova_npu_fused_rope", lambda *_: True
     )
     monkeypatch.setenv("SGLANG_SENSENOVA_NPU_FUSED_ROPE", "rotary_mul")
 
@@ -58,16 +58,16 @@ def test_npu_rotary_mul_failure_falls_back(monkeypatch):
         raise RuntimeError("unsupported")
 
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_rotary_mul=fail))
-    monkeypatch.setattr(modeling_qwen3, "SENSENOVA_NPU_ROTARY_MUL_DISABLED", False)
+    monkeypatch.setattr(rotary_embeddings, "SENSENOVA_NPU_ROTARY_MUL_DISABLED", False)
     monkeypatch.setattr(
-        modeling_qwen3, "_can_use_sensenova_npu_fused_rope", lambda *_: True
+        rotary_embeddings, "can_use_sensenova_npu_fused_rope", lambda *_: True
     )
     monkeypatch.setenv("SGLANG_SENSENOVA_NPU_FUSED_ROPE", "1")
 
     actual = modeling_qwen3.apply_rotary_pos_emb(q, k, cos, sin)
     for result, expected in zip(actual, eager(q, k, cos, sin)):
         torch.testing.assert_close(result, expected, atol=0, rtol=0)
-    assert modeling_qwen3.SENSENOVA_NPU_ROTARY_MUL_DISABLED
+    assert rotary_embeddings.SENSENOVA_NPU_ROTARY_MUL_DISABLED
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
