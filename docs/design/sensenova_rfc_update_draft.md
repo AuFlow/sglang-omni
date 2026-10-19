@@ -27,7 +27,7 @@ Current implementation status:
 - Deadline is carried in model metadata
   (`sensenova_deadline_monotonic_s`); TP cancellation uses a SenseNova
   scheduler subclass and a model exception.
-- CPU/Gloo regression currently passes 237 tests (2 skipped), covering T2I,
+- CPU/Gloo regression currently passes 239 tests (2 skipped), covering T2I,
   multi-output, UMM routing/output, Images usage, metrics, TP config and
   cancellation, Cache-DiT, sampling, and usage. GPU/NPU acceptance has not
   been run.
@@ -109,6 +109,6 @@ The current model-owned `generate` stage remains the supported path.
 ## Evidence
 
 - Branch: `wes/sensenova-umm-adapter`, merge `cd4b310fa`.
-- CPU/Gloo regression: 237 passed, 2 skipped (43 subtests).
+- CPU/Gloo regression: 239 passed, 2 skipped (43 subtests).
 - Not run in this environment: full SGLang platform tests, GPU/NPU inference,
   NCCL/HCCL cancellation, business acceptance.

@@ -314,7 +314,7 @@ before its actual encoded image size is known.
 
 CPU tests exercise the real adapter and controller, output ordering and usage,
 input/output budgets, deadlines, cleanup after late results, media integrity,
-and configuration construction. The current CPU/Gloo regression is 237 passed
+and configuration construction. The current CPU/Gloo regression is 239 passed
 and 2 skipped; it includes T2I, multi-output, UMM routing/output, Images usage,
 metrics, TP configuration and cancellation, Cache-DiT, sampling, and usage. HTTP tests cover both Images endpoints and
 preservation of 400/503 rejection statuses. Their local CPU run loads the real
