@@ -222,3 +222,45 @@ does not prove that model execution was batched.
 - Ascend I2I basic functionality and memory behavior have been validated on
   real hardware. Kernel-hit profiling and broader image-quality and performance
   characterization remain pending.
+
+## Shared UMM Integration Contract
+
+The opt-in UMM integration targets the same T2I/I2I workloads as the existing
+pipeline. It keeps the SenseNova model stage and its batching, TP/DP,
+Cache-DiT, and offload settings. Thinking and interleaved model generation
+remain outside this integration. This section specifies the integration
+contract; it does not claim hardware acceptance or upstream RFC approval.
+
+The controller dispatches one generation phase and accepts one image segment
+per output, in generation order. The phase returns the original request,
+including its continuation metadata. It owns the model and device caches;
+the adapter owns only request translation and retained request bookkeeping.
+The output stage shares the controller process, as UMMPipelineConfig requires.
+
+Each image segment uses the shared inline-media fields: kind, MIME type, byte
+size, SHA-256 digest, and data URL. The final result may carry image_usage with
+the existing Images input-token semantics. This is distinct from adapter
+usage(context), which reports retained memory bytes. The Images endpoints
+must preserve response format, output association, and usage when consuming
+UMM results. A final streamed result carries usage even when segment data was
+already delivered.
+
+All five controller bounds are required. Output count and input size are
+checked before generation; image dimensions and step count also have explicit
+model admission limits. Controller retained-byte accounting includes inline
+outputs and final usage. It does not represent total accelerator memory.
+
+Cancellation is cooperative at model checkpoints. TP ranks decide together
+before leaving a sequence of collectives. One cancelled member of a fused
+batch must not fail live members; their shared computation can continue until
+the batch has no live requests. Cancellation and failure release per-request
+state, while model weights remain available for later requests. Invalid input
+must be rejected before TP fan-out.
+
+Acceptance compares the opt-in UMM path with commit 706053fa0 using the same
+checkpoint, seeds, hardware, parameters, concurrency, and warmup. Required
+coverage includes T2I/I2I, ordered multi-output T2I, compatible request batching,
+TP/DP, Cache-DiT, supported offload, cancellation, deadlines, and failure
+recovery. CPU contract tests, GPU/NPU inference, performance measurements,
+and business acceptance are reported separately. Unexecuted combinations
+remain unvalidated.
