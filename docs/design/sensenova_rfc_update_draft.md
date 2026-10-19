@@ -110,5 +110,7 @@ The current model-owned `generate` stage remains the supported path.
 
 - Branch: `wes/sensenova-umm-adapter`, merge `cd4b310fa`.
 - CPU/Gloo regression: 239 passed, 5 skipped (43 subtests).
+- Full SGLang run on RTX 4090 (torch 2.13.0, SGLang 0.5.21): 223 passed,
+  1 failed (pre-existing `test_native_tp` bfloat16), 43 subtests.
 - Not run in this environment: full SGLang platform tests, GPU/NPU inference,
   NCCL/HCCL cancellation, business acceptance.

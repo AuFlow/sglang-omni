@@ -316,7 +316,11 @@ CPU tests exercise the real adapter and controller, output ordering and usage,
 input/output budgets, deadlines, cleanup after late results, media integrity,
 and configuration construction. The current CPU/Gloo regression is 239 passed
 and 5 skipped; it includes T2I, multi-output, UMM routing/output, Images usage,
-metrics, TP configuration and cancellation, Cache-DiT, sampling, and usage. HTTP tests cover both Images endpoints and
+metrics, TP configuration and cancellation, Cache-DiT, sampling, and usage.
+A full SGLang run on an RTX 4090 host (Python 3.12, torch 2.13.0, SGLang
+0.5.21) produced 223 passed, 1 failed, and 43 subtests passed. The one failure
+is the bfloat16 case of `test_native_tp`; it also reproduces at the pre-change
+commit `cd4b310fa`, so it is not introduced by the UMM migration. HTTP tests cover both Images endpoints and
 preservation of 400/503 rejection statuses. Their local CPU run loads the real
 SGLang utility module without the GPU-dependent package initializer; this does
 not validate a complete installed service.
