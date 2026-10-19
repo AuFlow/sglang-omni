@@ -12,7 +12,7 @@ from typing import Literal, TypedDict
 
 import sglang_omni.serve.metrics_registry as metrics_registry
 from sglang_omni.client.client import Client
-from sglang_omni.client.types import GenerateChunk, UsageInfo
+from sglang_omni.client.types import GenerateChunk, UMMGenerateChunk, UsageInfo
 
 SCHEDULER_METRICS_TIMEOUT_S = 5.0
 
@@ -215,6 +215,14 @@ class RequestMetrics:
                         image_counts[stage] = len(images)
                     elif chunk.image_b64:
                         image_counts[stage] = 1
+                    elif isinstance(chunk, UMMGenerateChunk) and chunk.segments:
+                        image_count = sum(
+                            1 for segment in chunk.segments if segment.kind == "image"
+                        )
+                        if image_count:
+                            image_counts[stage] = image_count
+                        else:
+                            pass
                     else:
                         pass
                     yield chunk

@@ -1119,11 +1119,25 @@ def umm_result_chunk(request_id: str, result: dict[str, object]) -> GenerateChun
         raise ValueError("UMM final segments must be one ordered execution")
     else:
         pass
-    metadata = result.get("metadata", {})
-    if not isinstance(metadata, dict):
-        raise ValueError("Invalid UMM completion metadata")
-    else:
+    usage_segment = next(
+        (segment for segment in segments if segment.kind == "usage"), None
+    )
+    image_usage = None
+    stage_name = None
+    if usage_segment is None:
         pass
+    elif usage_segment.data is None:
+        # A streamed final result already delivered the usage segment's data.
+        pass
+    elif not isinstance(usage_segment.data, dict):
+        raise ValueError("Invalid UMM usage segment")
+    else:
+        image_usage = parse_image_usage(usage_segment.data.get("image_usage"))
+        raw_stage_name = usage_segment.data.get("stage_name")
+        if isinstance(raw_stage_name, str):
+            stage_name = raw_stage_name
+        else:
+            pass
     finish_reason = result.get("finish_reason")
     return UMMGenerateChunk(
         request_id=request_id,
@@ -1135,7 +1149,8 @@ def umm_result_chunk(request_id: str, result: dict[str, object]) -> GenerateChun
         finish_reason=finish_reason if isinstance(finish_reason, str) else "stop",
         model_finish_reason="",
         modality="mixed",
-        image_usage=parse_image_usage(metadata.get("image_usage")),
+        image_usage=image_usage,
+        stage_name=stage_name,
         segments=segments,
     )
 
