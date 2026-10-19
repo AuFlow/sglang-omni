@@ -14,10 +14,18 @@ from sglang_omni.pipeline.umm import UMMController, UMMLimits
 
 
 @pytest.fixture
-def encoded_image() -> str:
-    image_buffer = io.BytesIO()
-    Image.new("RGB", (64, 32), color="red").save(image_buffer, format="PNG")
-    return base64.b64encode(image_buffer.getvalue()).decode("ascii")
+def encoded_images() -> list[str]:
+    images = []
+    for color in ("red", "green", "blue"):
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (64, 32), color=color).save(image_buffer, format="PNG")
+        images.append(base64.b64encode(image_buffer.getvalue()).decode("ascii"))
+    return images
+
+
+@pytest.fixture
+def encoded_image(encoded_images: list[str]) -> str:
+    return encoded_images[0]
 
 
 @pytest.fixture

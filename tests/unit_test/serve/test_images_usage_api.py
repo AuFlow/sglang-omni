@@ -92,15 +92,19 @@ def test_images_usage_and_complete_result_consumption(
 
 @pytest.mark.parametrize("editing", [False, True])
 def test_images_endpoints_consume_real_umm_results(
-    controller: UMMController, encoded_image: str, editing: bool
+    controller: UMMController, encoded_images: list[str], editing: bool
 ) -> None:
+    output_images = iter(encoded_images)
+
     class GenerationCoordinator:
         async def submit(self, request_id: str, request: OmniRequest) -> JsonValue:
             phase = controller.transition(StagePayload(request_id, request, None))
             assert phase is not None
             phase.data = {
                 "modality": "image",
-                "images_b64": [encoded_image] * request.params.get("n", 1),
+                "images_b64": [
+                    next(output_images) for _ in range(request.params.get("n", 1))
+                ],
                 "image_usage": {"input_tokens": 3, "total_tokens": 3},
             }
             completion = controller.transition(phase)
@@ -118,7 +122,11 @@ def test_images_endpoints_consume_real_umm_results(
                 "/v1/images/edits",
                 data={"prompt": "a mug", "size": "64x32", "n": 2},
                 files={
-                    "image": ("input.png", base64.b64decode(encoded_image), "image/png")
+                    "image": (
+                        "input.png",
+                        base64.b64decode(encoded_images[0]),
+                        "image/png",
+                    )
                 },
             )
         else:
@@ -127,9 +135,9 @@ def test_images_endpoints_consume_real_umm_results(
                 json={"prompt": "a mug", "size": "64x32", "n": 2},
             )
     assert response.status_code == 200, response.text
-    assert [image["b64_json"] for image in response.json()["data"]] == [
-        encoded_image
-    ] * 2
+    assert [image["b64_json"] for image in response.json()["data"]] == encoded_images[
+        :2
+    ]
     assert response.json()["usage"]["input_tokens"] == 3
 
 

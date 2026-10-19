@@ -243,15 +243,15 @@ def cancel_and_resume_generation(rank: int, rendezvous: str) -> None:
                 generation_checkpoint()
                 total = torch.ones((), dtype=torch.int32)
                 torch.distributed.all_reduce(total)
+                if rank == 0 and payload.request_id == "cancelled":
+                    scheduler.abort(payload.request_id)
+                else:
+                    pass
                 payload.data = int(total.item())
                 generation_checkpoint()
                 return payload
 
         scheduler = TensorParallelScheduler(compute, cooperative_cancellation=True)
-        if rank == 0:
-            scheduler.abort("cancelled")
-        else:
-            pass
         cancelled = StagePayload("cancelled", OmniRequest("prompt"), None)
         scheduler.run_single(
             IncomingMessage("cancelled", "new_request", cancelled), execution_loop

@@ -11,12 +11,7 @@ from typing import Literal
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from sglang_omni.models.sensenova_u1.admission import (
-    ADMISSION_METADATA_KEY,
-    SenseNovaAdmissionLimits,
-    validate_admission,
-    validate_output_dimensions,
-)
+from sglang_omni.models.sensenova_u1.admission import validate_output_dimensions
 from sglang_omni.models.sensenova_u1.cache_dit import SenseNovaCacheDit
 from sglang_omni.models.sensenova_u1.cancellation import (
     GenerationScope,
@@ -127,13 +122,6 @@ def image_generation_batch_key(
 
 def validate_generation_request(payload: StagePayload, model: NEOChatModel) -> None:
     """Reject invalid TP work before the leader dispatches it to other ranks."""
-    limits = payload.request.metadata.get(ADMISSION_METADATA_KEY)
-    if limits is not None:
-        validate_admission(
-            payload.request, SenseNovaAdmissionLimits.model_validate(limits)
-        )
-    else:
-        pass
     inputs = payload.request.inputs
     is_edit = isinstance(inputs, dict) and inputs.get("task") == "image_edit"
     if is_edit:

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
+from sglang_omni.models.sensenova_u1.image_processing import reference_image_size
 from sglang_omni.models.sensenova_u1.sampling import (
     SenseNovaU1ImageEditSampling,
     SenseNovaU1Sampling,
@@ -75,24 +76,33 @@ def validate_admission(
         else:
             pass
         reference_pixels = 0
+        resized_reference_pixels = 0
         for reference in references:
             if not isinstance(reference, str) or not reference:
                 raise ValueError("SenseNova references must be non-empty base64 images")
             else:
                 image_bytes = base64.b64decode(reference, validate=True)
-            with Image.open(io.BytesIO(image_bytes)) as image:
+            try:
+                image = Image.open(io.BytesIO(image_bytes))
+            except Image.DecompressionBombError as error:
+                raise ValueError(
+                    "SenseNova reference exceeds the image decoder pixel limit"
+                ) from error
+            with image:
                 reference_pixels += image.width * image.height
                 if reference_pixels > limits.max_reference_pixels:
                     raise ValueError("SenseNova references exceed max_reference_pixels")
                 else:
+                    width, height = reference_image_size(
+                        image.width, image.height, len(references), options
+                    )
+                    resized_reference_pixels += width * height
+                if resized_reference_pixels > limits.max_reference_pixels:
+                    raise ValueError(
+                        "SenseNova resized references exceed max_reference_pixels"
+                    )
+                else:
                     image.verify()
-        if (
-            options.input_max_pixels is not None
-            and options.input_max_pixels * len(references) > limits.max_reference_pixels
-        ):
-            raise ValueError("SenseNova resized references exceed max_reference_pixels")
-        else:
-            pass
     else:
         raise ValueError(
             "SenseNova UMM supports a text prompt or an image_edit request"

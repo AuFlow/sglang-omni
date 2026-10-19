@@ -238,8 +238,11 @@ the adapter owns only request translation and retained request bookkeeping.
 The output stage shares the controller process, as UMMPipelineConfig requires.
 
 Each image segment uses the shared inline-media fields: kind, MIME type, byte
-size, SHA-256 digest, and data URL. The final result may carry image_usage with
-the existing Images input-token semantics. This is distinct from adapter
+size, SHA-256 digest, and data URL. A completing UMMStep may carry optional
+completion_metadata, returned under metadata in the final result and counted
+against the retained-byte bound. The controller does not interpret its fields.
+SenseNova puts image_usage in this metadata; the adapter and SDK validate its
+Images input-token semantics. This is distinct from adapter
 usage(context), which reports retained memory bytes. The Images endpoints
 must preserve response format, output association, and usage when consuming
 UMM results. A final streamed result carries usage even when segment data was
@@ -248,7 +251,10 @@ already delivered.
 All five controller bounds are required. Output count and input size are
 checked before generation; image dimensions and step count also have explicit
 model admission limits. Controller retained-byte accounting includes inline
-outputs and final usage. It does not represent total accelerator memory.
+outputs and completion metadata. Reference-image bounds cover both original
+and resized pixels, using the same size calculation as preprocessing. They
+respect default resize settings and do_resize=False. These bounds do not
+represent total accelerator memory.
 
 Cancellation is cooperative at model checkpoints. TP ranks decide together
 before leaving a sequence of collectives. One cancelled member of a fused

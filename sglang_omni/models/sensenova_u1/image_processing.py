@@ -6,17 +6,71 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import math
 
 import torch
 from PIL import Image
 
-from sglang_omni.models.sensenova_u1.neo_unify.utils import smart_resize
 from sglang_omni.models.sensenova_u1.sampling import SenseNovaU1ImageEditSampling
 from sglang_omni.proto.request import StagePayload
 
 DEFAULT_INPUT_MAX_PIXELS = 2048 * 2048
 MIN_INPUT_MAX_PIXELS = 512 * 512
 IMAGE_RESIZE_FACTOR = 32
+
+
+def smart_resize(
+    height: int,
+    width: int,
+    factor: int = 32,
+    min_pixels: int = 65536,
+    max_pixels: int = 4194304,
+) -> tuple[int, int]:
+    """Resize to the target pixel budget and round to the model patch grid."""
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
+        )
+    else:
+        pass
+    resized_height = max(factor, round(height / factor) * factor)
+    resized_width = max(factor, round(width / factor) * factor)
+    if resized_height * resized_width > max_pixels:
+        resize_scale = math.sqrt((height * width) / max_pixels)
+        resized_height = max(
+            factor, math.floor(height / resize_scale / factor) * factor
+        )
+        resized_width = max(factor, math.floor(width / resize_scale / factor) * factor)
+    elif resized_height * resized_width < min_pixels:
+        resize_scale = math.sqrt(min_pixels / (height * width))
+        resized_height = math.ceil(height * resize_scale / factor) * factor
+        resized_width = math.ceil(width * resize_scale / factor) * factor
+    else:
+        pass
+    return resized_height, resized_width
+
+
+def reference_image_size(
+    width: int, height: int, reference_count: int, options: SenseNovaU1ImageEditSampling
+) -> tuple[int, int]:
+    if not options.do_resize:
+        return width, height
+    elif options.input_max_pixels is not None:
+        input_max_pixels = options.input_max_pixels
+    elif reference_count <= 2:
+        input_max_pixels = DEFAULT_INPUT_MAX_PIXELS
+    else:
+        input_max_pixels = max(
+            MIN_INPUT_MAX_PIXELS, 2 * DEFAULT_INPUT_MAX_PIXELS // reference_count
+        )
+    resized_height, resized_width = smart_resize(
+        height=height,
+        width=width,
+        factor=IMAGE_RESIZE_FACTOR,
+        min_pixels=input_max_pixels,
+        max_pixels=input_max_pixels,
+    )
+    return resized_width, resized_height
 
 
 def decode_reference_images(value: str | list[str] | None) -> list[Image.Image]:
@@ -34,7 +88,12 @@ def decode_reference_images(value: str | list[str] | None) -> list[Image.Image]:
             image_bytes = base64.b64decode(encoded_image, validate=True)
             image = Image.open(io.BytesIO(image_bytes))
             image.load()
-        except (binascii.Error, OSError, ValueError) as exc:
+        except (
+            binascii.Error,
+            OSError,
+            ValueError,
+            Image.DecompressionBombError,
+        ) as exc:
             raise ValueError(
                 "SenseNova-U1 received an invalid reference image"
             ) from exc
@@ -46,14 +105,6 @@ def prepare_reference_images(
     value: str | list[str] | None, options: SenseNovaU1ImageEditSampling
 ) -> list[Image.Image]:
     images = decode_reference_images(value)
-    if options.input_max_pixels:
-        input_max_pixels = options.input_max_pixels
-    elif len(images) <= 2:
-        input_max_pixels = DEFAULT_INPUT_MAX_PIXELS
-    else:
-        input_max_pixels = max(
-            MIN_INPUT_MAX_PIXELS, 2 * DEFAULT_INPUT_MAX_PIXELS // len(images)
-        )
     prepared = []
     for image in images:
         if image.mode == "RGBA":
@@ -62,18 +113,11 @@ def prepare_reference_images(
             image = background
         else:
             image = image.convert("RGB")
-        if options.do_resize:
-            height, width = smart_resize(
-                height=image.height,
-                width=image.width,
-                factor=IMAGE_RESIZE_FACTOR,
-                min_pixels=input_max_pixels,
-                max_pixels=input_max_pixels,
-            )
-            if image.size != (width, height):
-                image = image.resize((width, height), Image.Resampling.LANCZOS)
-            else:
-                pass
+        width, height = reference_image_size(
+            image.width, image.height, len(images), options
+        )
+        if image.size != (width, height):
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
         else:
             pass
         prepared.append(image)

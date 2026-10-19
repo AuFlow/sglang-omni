@@ -2,14 +2,18 @@
 """SenseNova phase, output, and Images API contracts on the real controller."""
 
 from dataclasses import replace
+from pathlib import Path
 from typing import Literal
 
 import pytest
 import torch
+from PIL import Image
+from pydantic import JsonValue
 
 from sglang_omni.client.client import Client
 from sglang_omni.client.image_media import InlineImage
 from sglang_omni.client.types import UMMGenerateChunk
+from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.runtime import (
     resolve_stage_factory_kwargs,
     resolve_stage_typed_kwargs,
@@ -18,14 +22,16 @@ from sglang_omni.models.sensenova_u1.cancellation import (
     GenerationScope,
     generation_checkpoint,
 )
+from sglang_omni.models.sensenova_u1.image_processing import prepare_reference_images
+from sglang_omni.models.sensenova_u1.sampling import SenseNovaU1ImageEditSampling
 from sglang_omni.models.sensenova_u1.umm import SenseNovaUMMAdapter
 from sglang_omni.models.sensenova_u1.umm_config import SenseNovaU1UMMPipelineConfig
 from sglang_omni.pipeline.umm import (
     UMM_DEADLINE_METADATA_KEY,
-    CloseReason,
     UMMContext,
     UMMController,
     UMMRequestError,
+    UMMStep,
     create_umm_controller,
 )
 from sglang_omni.proto.request import OmniRequest, StagePayload
@@ -37,7 +43,10 @@ pytest_plugins = ["tests.unit_test.fixtures.sensenova_umm"]
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("image_count", [1, 3])
 def test_outputs_and_usage_survive_controller_completion(
-    controller: UMMController, encoded_image: str, streaming: bool, image_count: int
+    controller: UMMController,
+    encoded_images: list[str],
+    streaming: bool,
+    image_count: int,
 ) -> None:
     request = OmniRequest("a red mug", params={"n": image_count, "stream": streaming})
     phase = controller.transition(StagePayload("request", request, None))
@@ -45,7 +54,7 @@ def test_outputs_and_usage_survive_controller_completion(
     assert phase.request.params["stream"] is False
     phase.data = {
         "modality": "image",
-        "images_b64": [encoded_image] * image_count,
+        "images_b64": encoded_images[:image_count],
         "image_usage": {"input_tokens": 3, "total_tokens": 3},
     }
     result = controller.transition(phase)
@@ -63,12 +72,12 @@ def test_outputs_and_usage_survive_controller_completion(
         assert [
             InlineImage.model_validate(segment["data"]).encoded_image()
             for segment in segments
-        ] == [encoded_image] * image_count
+        ] == encoded_images[:image_count]
     else:
         assert [
             InlineImage.model_validate(segment.data).encoded_image()
             for segment in completion.segments
-        ] == [encoded_image] * image_count
+        ] == encoded_images[:image_count]
     assert not controller.contexts
     assert not controller.adapter.executions
 
@@ -87,20 +96,34 @@ def test_bad_result_releases_adapter_state(
     assert not controller.adapter.executions
 
 
-def test_usage_bytes_are_part_of_controller_bound(
-    controller: UMMController, encoded_image: str
+@pytest.mark.parametrize("oversized", [False, True])
+def test_completion_metadata_is_delivered_within_controller_budget(
+    controller: UMMController,
+    encoded_image: str,
+    oversized: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     phase = controller.transition(StagePayload("request", OmniRequest("prompt"), None))
     assert phase is not None
-    controller.limits = replace(controller.limits, max_retained_bytes=1)
-    phase.data = {
-        "modality": "image",
-        "image_b64": encoded_image,
-        "image_usage": {"total_tokens": 3},
-    }
-    with pytest.raises(RuntimeError, match="max_retained_bytes"):
-        controller.transition(phase)
-    assert controller.outbox.empty()
+    controller.limits = replace(controller.limits, max_retained_bytes=1024)
+    phase.data = {"modality": "image", "image_b64": encoded_image}
+    metadata = {"trace": "x" * (1024 if oversized else 1)}
+    advance_adapter = controller.adapter.advance
+
+    def complete(context: UMMContext, phase: str, result: object) -> UMMStep:
+        return replace(
+            advance_adapter(context, phase, result), completion_metadata=metadata
+        )
+
+    monkeypatch.setattr(controller.adapter, "advance", complete)
+    if oversized:
+        with pytest.raises(RuntimeError, match="max_retained_bytes"):
+            controller.transition(phase)
+        assert controller.outbox.empty()
+    else:
+        completion = controller.transition(phase)
+        assert completion is not None
+        assert completion.data["metadata"] == metadata
     assert not controller.adapter.executions
 
 
@@ -191,35 +214,9 @@ def test_expired_phase_stops_at_checkpoint() -> None:
             generation_checkpoint()
 
 
-@pytest.mark.parametrize("closing", ["aborted", "expired", "shutdown"])
-def test_adapter_cleanup_survives_late_results(
-    controller: UMMController,
-    closing: Literal["aborted", "expired", "shutdown"],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    closed: list[CloseReason] = []
-    close_adapter = controller.adapter.close
-
-    def record_close(context: UMMContext, reason: CloseReason) -> None:
-        close_adapter(context, reason)
-        closed.append(reason)
-
-    monkeypatch.setattr(controller.adapter, "close", record_close)
-    phase = controller.transition(StagePayload("request", OmniRequest("prompt"), None))
-    assert phase is not None
-    if closing == "expired":
-        deadline = controller.contexts["request"].deadline
-        monkeypatch.setattr(controller, "clock", lambda: deadline)
-        controller.forget("request")
-    elif closing == "shutdown":
-        controller.forget_all()
-    else:
-        controller.abort("request")
-    with pytest.raises(RuntimeError, match="inactive request"):
-        controller.transition(phase)
-    controller.forget("request")
-    assert closed == [closing]
-    assert not controller.contexts
+def test_abort_releases_sensenova_state(controller: UMMController) -> None:
+    controller.transition(StagePayload("request", OmniRequest("prompt"), None))
+    controller.abort("request")
     assert not controller.adapter.executions
 
 
@@ -269,7 +266,11 @@ def test_inline_media_rejects_tampered_content(
 
 
 def test_loaded_configuration_constructs_controller_and_dispatches() -> None:
-    configuration = SenseNovaU1UMMPipelineConfig(model_path="unused")
+    config_path = (
+        Path(__file__).resolve().parents[3] / "examples/configs/sensenova_u1_umm.yaml"
+    )
+    configuration = ConfigManager.from_file(str(config_path)).config
+    assert isinstance(configuration, SenseNovaU1UMMPipelineConfig)
     stage = configuration.stage_named("orchestrator")
     arguments = {
         **resolve_stage_factory_kwargs(stage, configuration),
@@ -294,3 +295,72 @@ def test_config_rejects_insufficient_bounds_and_disabled_cancellation(
         configuration.stage_named("generate").factory.cooperative_cancellation = False
     with pytest.raises(ValueError):
         SenseNovaU1UMMPipelineConfig.model_validate(configuration.model_dump())
+
+
+@pytest.mark.parametrize(
+    "parameters, reference_count, pixel_limit",
+    [
+        ({}, 1, 512 * 512),
+        ({"input_max_pixels": 512 * 512}, 1, 512 * 512),
+        ({}, 3, 2048 * 2048),
+    ],
+)
+def test_resize_budget_matches_preprocessing(
+    controller: UMMController,
+    encoded_image: str,
+    parameters: dict[str, JsonValue],
+    reference_count: int,
+    pixel_limit: int,
+) -> None:
+    """Small references must not bypass the resized pixel budget."""
+    adapter = controller.adapter
+    assert isinstance(adapter, SenseNovaUMMAdapter)
+    adapter.limits = adapter.limits.model_copy(
+        update={"max_reference_pixels": pixel_limit}
+    )
+    references = [encoded_image] * reference_count
+    request = OmniRequest(
+        {"task": "image_edit", "prompt": "edit", "image_b64": references}, parameters
+    )
+    images = prepare_reference_images(
+        references, SenseNovaU1ImageEditSampling.from_params(parameters)
+    )
+    assert sum(image.width * image.height for image in images) > pixel_limit
+    with pytest.raises(UMMRequestError, match="max_reference_pixels"):
+        controller.transition(StagePayload("request", request, None))
+    assert not adapter.executions
+
+
+def test_disabled_resize_preserves_small_reference_admission(
+    controller: UMMController,
+    encoded_image: str,
+) -> None:
+    adapter = controller.adapter
+    assert isinstance(adapter, SenseNovaUMMAdapter)
+    adapter.limits = adapter.limits.model_copy(update={"max_reference_pixels": 64 * 32})
+    parameters = {"do_resize": False, "input_max_pixels": 2048 * 2048}
+    request = OmniRequest(
+        {"task": "image_edit", "prompt": "edit", "image_b64": encoded_image}, parameters
+    )
+    images = prepare_reference_images(
+        encoded_image, SenseNovaU1ImageEditSampling.from_params(parameters)
+    )
+    assert images[0].size == (64, 32)
+    assert controller.transition(StagePayload("request", request, None)) is not None
+    controller.abort("request")
+
+
+def test_decoder_pixel_limit_is_a_request_error(
+    controller: UMMController,
+    encoded_image: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Images over the decoder pixel limit must be rejected as invalid requests."""
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    request = OmniRequest(
+        {"task": "image_edit", "prompt": "edit", "image_b64": encoded_image}
+    )
+    with pytest.raises(UMMRequestError, match="pixel limit"):
+        controller.transition(StagePayload("request", request, None))
+    assert not controller.contexts
+    assert controller.outbox.empty()

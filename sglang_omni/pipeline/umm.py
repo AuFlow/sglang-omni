@@ -23,8 +23,6 @@ from dataclasses import dataclass, field, replace
 from typing import ClassVar, Literal, Protocol, TypeAlias, runtime_checkable
 
 from sglang_omni.admission import QueueFullError
-from sglang_omni.client.image_media import parse_image_usage
-from sglang_omni.client.types import ImageUsageDict
 from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
@@ -97,7 +95,7 @@ class UMMStep:
     request: OmniRequest | None = None
     outputs: tuple[UMMOutput, ...] = ()
     context: ContextRef | None = None
-    image_usage: ImageUsageDict | None = None
+    completion_metadata: dict[str, JSONValue] | None = None
 
 
 def limit_problems(limits: Mapping[str, object]) -> list[str]:
@@ -527,18 +525,22 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
             raise self.budget_error("max_outputs", limits.max_outputs, client=client)
         else:
             pass
-        image_usage = parse_image_usage(step.image_usage)
-        if image_usage is not None and step.phase is not None:
-            raise ValueError("Image usage belongs to the completing UMM step")
+        completion_metadata = step.completion_metadata
+        if completion_metadata is not None and step.phase is not None:
+            raise ValueError("Completion metadata belongs to the completing UMM step")
         else:
             pass
-        usage_bytes = (
-            len(json.dumps(image_usage).encode("utf-8"))
-            if image_usage is not None
+        metadata_bytes = (
+            len(
+                json.dumps(
+                    completion_metadata, ensure_ascii=False, allow_nan=False
+                ).encode("utf-8")
+            )
+            if completion_metadata is not None
             else 0
         )
         retained = (
-            usage_bytes
+            metadata_bytes
             + context.output_bytes
             + sum(encoded_bytes(output) for output in step.outputs)
         )
@@ -615,8 +617,8 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
                 ],
                 "finish_reason": "stop",
             }
-            if image_usage is not None:
-                result["image_usage"] = image_usage
+            if completion_metadata is not None:
+                result["metadata"] = completion_metadata
             else:
                 pass
             return StagePayload(request_id, request, result), added

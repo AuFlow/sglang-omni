@@ -1119,6 +1119,11 @@ def umm_result_chunk(request_id: str, result: dict[str, object]) -> GenerateChun
         raise ValueError("UMM final segments must be one ordered execution")
     else:
         pass
+    metadata = result.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("Invalid UMM completion metadata")
+    else:
+        pass
     finish_reason = result.get("finish_reason")
     return UMMGenerateChunk(
         request_id=request_id,
@@ -1130,7 +1135,7 @@ def umm_result_chunk(request_id: str, result: dict[str, object]) -> GenerateChun
         finish_reason=finish_reason if isinstance(finish_reason, str) else "stop",
         model_finish_reason="",
         modality="mixed",
-        image_usage=parse_image_usage(result.get("image_usage")),
+        image_usage=parse_image_usage(metadata.get("image_usage")),
         segments=segments,
     )
 

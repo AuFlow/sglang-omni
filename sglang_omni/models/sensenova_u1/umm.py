@@ -79,12 +79,15 @@ class SenseNovaUMMAdapter:
         else:
             pass
         execution.reserved_output_bytes = 0
+        image_usage = parse_image_usage(generation.image_usage)
         return UMMStep(
             outputs=tuple(
                 UMMOutput("image", InlineImage.from_png(encoded_image).model_dump())
                 for encoded_image in images
             ),
-            image_usage=parse_image_usage(generation.image_usage),
+            completion_metadata=(
+                {"image_usage": image_usage} if image_usage is not None else None
+            ),
         )
 
     def usage(self, context: UMMContext) -> int:

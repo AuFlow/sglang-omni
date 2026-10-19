@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import torch
 import torchvision.transforms as T
 from PIL import Image
 from pydantic import JsonValue
+
+from sglang_omni.models.sensenova_u1.image_processing import smart_resize
 
 # Modified for SGLang; see this directory's README.md for upstream source.
 
@@ -35,50 +36,6 @@ SYSTEM_MESSAGE_FOR_GEN = (
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
-
-
-def round_by_factor(number: float, factor: int) -> int:
-    """Returns the closest integer to number that is divisible by factor."""
-    return round(number / factor) * factor
-
-
-def ceil_by_factor(number: float, factor: int) -> int:
-    """Returns the smallest integer >= number that is divisible by factor."""
-    return math.ceil(number / factor) * factor
-
-
-def floor_by_factor(number: float, factor: int) -> int:
-    """Returns the largest integer <= number that is divisible by factor."""
-    return math.floor(number / factor) * factor
-
-
-def smart_resize(
-    height: int,
-    width: int,
-    factor: int = 32,
-    min_pixels: int = 65536,
-    max_pixels: int = 4194304,
-) -> tuple[int, int]:
-    """Rescale so that H/W are divisible by factor and total pixels ∈ [min, max]."""
-    if max(height, width) / min(height, width) > 200:
-        raise ValueError(
-            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
-        )
-    else:
-        pass
-    h_bar = max(factor, round_by_factor(height, factor))
-    w_bar = max(factor, round_by_factor(width, factor))
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(factor, floor_by_factor(height / beta, factor))
-        w_bar = max(factor, floor_by_factor(width / beta, factor))
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = ceil_by_factor(height * beta, factor)
-        w_bar = ceil_by_factor(width * beta, factor)
-    else:
-        pass
-    return h_bar, w_bar
 
 
 def dynamic_preprocess_native_resolution(
