@@ -321,4 +321,4 @@ def visualize_mask(mask: torch.Tensor, i: int = 0, j: int = 12) -> None:
 # note (Codex): Preserve existing import and serialized class lookup names.
 _HAS_FLASH_ATTN = HAS_FLASH_ATTN
 _flash_or_sdpa = flash_or_sdpa
-_sdpa_attn_func = sdpa_attn_func
+sdpa_attn_func = sdpa_attn_func

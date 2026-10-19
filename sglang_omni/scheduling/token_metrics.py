@@ -3,7 +3,7 @@
 
 from typing import Protocol
 
-from sglang_omni.scheduling.messages import OutgoingMessage
+from sglang_omni.scheduling.message import OutgoingMessage
 
 
 class TokenMetricsRequest(Protocol):

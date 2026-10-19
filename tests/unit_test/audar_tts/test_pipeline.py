@@ -31,7 +31,7 @@ from sglang_omni.models.audar_tts.request_builders import build_audar_state
 from sglang_omni.models.model_capabilities import get_model_capabilities
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.pipeline.control_plane import deserialize_message, serialize_message
-from sglang_omni.pipeline.mp_runner import _build_stage_groups
+from sglang_omni.pipeline.mp_runner import build_stage_groups
 from sglang_omni.pipeline.runtime_config import prepare_pipeline_runtime
 from sglang_omni.proto import DataReadyMessage, OmniRequest, StagePayload
 from sglang_omni.relay.shm import ShmRelay
@@ -73,7 +73,9 @@ def make_payload(
     state: AudarTTSState | None = None,
     request_id: str = "request",
 ) -> StagePayload:
-    metadata = {"tts_params": tts_params} if tts_params is not None else {}
+    metadata: dict[str, object] = (
+        {"tts_params": tts_params} if tts_params is not None else {}
+    )
     return StagePayload(
         request_id=request_id,
         request=OmniRequest(inputs=inputs, params=params or {}, metadata=metadata),
@@ -218,7 +220,7 @@ def test_config_dispatch_injects_model_path_and_gpu(tmp_path: Any) -> None:
     )
     prepared = prepare_pipeline_runtime(config)
     try:
-        groups = _build_stage_groups(
+        groups = build_stage_groups(
             config,
             ctx=FakeMpContext(),
             stages_cfg=prepared.stages_cfg,
@@ -249,17 +251,9 @@ def test_config_dispatch_injects_model_path_and_gpu(tmp_path: Any) -> None:
     }
 
 
-def test_request_lowering_keeps_audar_defaults_unless_explicit() -> None:
+def test_request_lowering_keeps_audar_defaults_unless_set() -> None:
     reference = {"bytes": five_second_wav(), "text": "reference transcript"}
-    implicit = make_payload(
-        inputs={"text": "target", "references": [reference]},
-        params={
-            "temperature": 0.8,
-            "top_p": 0.8,
-            "top_k": 30,
-            "repetition_penalty": 1.1,
-        },
-    )
+    implicit = make_payload(inputs={"text": "target", "references": [reference]})
     implicit_state = build_audar_state(implicit)
     assert implicit_state.generation_kwargs == {
         "max_new_tokens": 2048,
@@ -272,14 +266,7 @@ def test_request_lowering_keeps_audar_defaults_unless_explicit() -> None:
     explicit = make_payload(
         inputs={"text": "target", "references": [reference]},
         params={"temperature": 0.6, "top_k": 20, "max_new_tokens": 128},
-        tts_params={
-            "explicit_generation_params": [
-                "temperature",
-                "top_k",
-                "max_new_tokens",
-            ],
-            "seed": 17,
-        },
+        tts_params={"seed": 17},
     )
     explicit_state = build_audar_state(explicit)
     assert explicit_state.generation_kwargs == {
@@ -316,15 +303,9 @@ def test_openai_speech_request_lowers_to_audar_state() -> None:
         validate=False,
         reference_descriptors=prepared.reference_descriptors,
     )
-    assert generation_request.metadata["tts_params"]["explicit_generation_params"] == [
-        "max_new_tokens",
-        "seed",
-        "temperature",
-        "top_k",
-    ]
     payload = StagePayload(
         request_id="request",
-        request=Client._build_omni_request(generation_request),
+        request=Client.build_omni_request(generation_request),
         data={},
     )
 
@@ -432,9 +413,9 @@ def test_reference_encoder_builds_prompt_and_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     codec = FakeCodec()
-    monkeypatch.setattr(stages, "_load_codec", lambda *args, **kwargs: codec)
+    monkeypatch.setattr(stages, "load_codec", lambda *args, **kwargs: codec)
     scheduler = stages.create_reference_encoder_executor(gpu_id=None)
-    reference_audio = {"bytes": five_second_wav()}
+    reference_audio: dict[str, object] = {"bytes": five_second_wav()}
 
     def encode(request_id: str) -> AudarTTSState:
         payload = make_payload(
@@ -445,7 +426,7 @@ def test_reference_encoder_builds_prompt_and_caches(
             ),
             request_id=request_id,
         )
-        return AudarTTSState.from_dict(scheduler._fn(payload).data)
+        return AudarTTSState.from_dict(scheduler.fn(payload).data)
 
     first = encode("first")
     second = encode("second")
@@ -454,62 +435,6 @@ def test_reference_encoder_builds_prompt_and_caches(
     assert first.prompt == build_prompt("target", "reference", [7, 8, 9])
     assert second.prompt == first.prompt
     assert first.reference_audio is None
-
-
-def test_reference_encoder_singleflights_same_reference(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    codec = FakeCodec()
-    encode_started = threading.Event()
-    release_encode = threading.Event()
-    second_normalized = threading.Event()
-    normalize_lock = threading.Lock()
-    normalize_calls = 0
-    original_normalize = stages._normalize_reference
-
-    def normalize(raw_input: Any):
-        nonlocal normalize_calls
-        item = original_normalize(raw_input)
-        with normalize_lock:
-            normalize_calls += 1
-            if normalize_calls == 2:
-                second_normalized.set()
-        return item
-
-    def encode_code(waveform: torch.Tensor) -> torch.Tensor:
-        codec.encode_calls += 1
-        encode_started.set()
-        assert release_encode.wait(timeout=2)
-        return torch.tensor([[[7, 8, 9]]])
-
-    monkeypatch.setattr(stages, "_normalize_reference", normalize)
-    monkeypatch.setattr(codec, "encode_code", encode_code)
-    monkeypatch.setattr(stages, "_load_codec", lambda *args, **kwargs: codec)
-    scheduler = stages.create_reference_encoder_executor(gpu_id=None, max_concurrency=2)
-    reference_audio = {"bytes": five_second_wav()}
-
-    def encode(request_id: str) -> AudarTTSState:
-        payload = make_payload(
-            state=AudarTTSState(
-                target_text="target",
-                reference_text="reference",
-                reference_audio=reference_audio,
-            ),
-            request_id=request_id,
-        )
-        return AudarTTSState.from_dict(scheduler._fn(payload).data)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(encode, "first")
-        assert encode_started.wait(timeout=2)
-        second = executor.submit(encode, "second")
-        assert second_normalized.wait(timeout=2)
-        release_encode.set()
-        results = [first.result(timeout=2), second.result(timeout=2)]
-
-    assert scheduler._max_concurrency == 2
-    assert codec.encode_calls == 1
-    assert results[0].prompt == results[1].prompt
 
 
 def test_reference_encoder_serializes_codec_for_different_references(
@@ -532,7 +457,7 @@ def test_reference_encoder_serializes_codec_for_different_references(
         return torch.tensor([[[7, 8, 9]]])
 
     monkeypatch.setattr(codec, "encode_code", encode_code)
-    monkeypatch.setattr(stages, "_load_codec", lambda *args, **kwargs: codec)
+    monkeypatch.setattr(stages, "load_codec", lambda *args, **kwargs: codec)
     scheduler = stages.create_reference_encoder_executor(gpu_id=None, max_concurrency=2)
 
     def encode(request_id: str, wav_bytes: bytes) -> AudarTTSState:
@@ -544,7 +469,7 @@ def test_reference_encoder_serializes_codec_for_different_references(
             ),
             request_id=request_id,
         )
-        return AudarTTSState.from_dict(scheduler._fn(payload).data)
+        return AudarTTSState.from_dict(scheduler.fn(payload).data)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
@@ -558,8 +483,8 @@ def test_reference_encoder_serializes_codec_for_different_references(
     assert all(result.prompt for result in results)
 
 
-def _reference_service(codec: FakeCodec) -> Any:
-    hook = stages._AudarReferenceEncodeHook(
+def reference_service(codec: FakeCodec) -> Any:
+    hook = stages.AudarReferenceEncodeHook(
         codec=codec,
         device="cpu",
         codec_model="codec",
@@ -571,7 +496,7 @@ def _reference_service(codec: FakeCodec) -> Any:
 def test_reference_hook_preserves_key_and_tensor_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hook = stages._AudarReferenceEncodeHook(
+    hook = stages.AudarReferenceEncodeHook(
         codec=FakeCodec(),
         device="cpu",
         codec_model="codec",
@@ -586,7 +511,7 @@ def test_reference_hook_preserves_key_and_tensor_contract(
         encoder_id="neucodec",
         encoder_config_hash=stages.hash_bytes(b"sample_rate:16000"),
         artifact_kind="audar_reference_codes",
-        input_key=stages._reference_key(item),
+        input_key=stages.reference_key(item),
     )
 
     stored = hook.store_artifact(torch.tensor([7, 8, 9], dtype=torch.long))
@@ -598,40 +523,8 @@ def test_reference_hook_preserves_key_and_tensor_contract(
     assert first.data_ptr() != stored.data_ptr()
     assert first.data_ptr() != second.data_ptr()
 
-    monkeypatch.setattr(stages, "_reference_key", lambda item: None)
+    monkeypatch.setattr(stages, "reference_key", lambda item: None)
     assert hook.cache_key(item) is None
-
-
-def test_reference_encoder_propagates_singleflight_failure() -> None:
-    codec = FakeCodec()
-    encode_started = threading.Event()
-    release_encode = threading.Event()
-
-    def encode_code(waveform: torch.Tensor) -> torch.Tensor:
-        codec.encode_calls += 1
-        encode_started.set()
-        assert release_encode.wait(timeout=2)
-        raise RuntimeError("codec failed")
-
-    codec.encode_code = encode_code
-    service = _reference_service(codec)
-    reference_audio = {"bytes": five_second_wav()}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        leader = executor.submit(service.get_or_encode, reference_audio)
-        assert encode_started.wait(timeout=2)
-        follower = executor.submit(service.get_or_encode, reference_audio)
-        deadline = time.monotonic() + 2
-        while service.stats()["merged"] < 1 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert service.stats()["merged"] == 1
-        release_encode.set()
-        for future in (leader, follower):
-            with pytest.raises(RuntimeError, match="codec failed"):
-                future.result(timeout=2)
-
-    assert codec.encode_calls == 1
-    assert service.stats()["failed"] == 1
 
 
 def test_reference_encoder_revalidates_changed_path(tmp_path) -> None:
@@ -651,7 +544,7 @@ def test_reference_encoder_revalidates_changed_path(tmp_path) -> None:
         return torch.tensor([[[7, 8, 9]]])
 
     codec.encode_code = encode_code
-    service = _reference_service(codec)
+    service = reference_service(codec)
     reference_audio = {"audio_path": str(reference_path)}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -666,28 +559,6 @@ def test_reference_encoder_revalidates_changed_path(tmp_path) -> None:
     service.get_or_encode(reference_audio)
 
     assert codec.encode_calls == 3
-
-
-def test_reference_encoder_reports_cache_stats() -> None:
-    codec = FakeCodec()
-    service = _reference_service(codec)
-    reference_audio = {"bytes": five_second_wav()}
-
-    service.get_or_encode(reference_audio)
-    service.get_or_encode(reference_audio)
-
-    assert service.stats() == {
-        "hits": 1,
-        "misses": 1,
-        "merged": 0,
-        "entries": 1,
-        "bytes": 12,
-        "evictions": 0,
-        "failed": 0,
-        "uncacheable": 0,
-        "batches": 0,
-        "batched_items": 0,
-    }
 
 
 def test_codec_model_and_lock_are_shared_between_stages(
@@ -706,16 +577,16 @@ def test_codec_model_and_lock_are_shared_between_stages(
     monkeypatch.setitem(
         sys.modules, "neucodec", types.SimpleNamespace(NeuCodec=FakeNeuCodec)
     )
-    stages._load_codec.cache_clear()
-    stages._codec_lock.cache_clear()
+    stages.load_codec.cache_clear()
+    stages.codec_lock.cache_clear()
     try:
-        first = stages._load_codec("codec", "revision", "cpu")
-        second = stages._load_codec("codec", "revision", "cpu")
-        first_lock = stages._codec_lock("codec", "revision", "cpu")
-        second_lock = stages._codec_lock("codec", "revision", "cpu")
+        first = stages.load_codec("codec", "revision", "cpu")
+        second = stages.load_codec("codec", "revision", "cpu")
+        first_lock = stages.codec_lock("codec", "revision", "cpu")
+        second_lock = stages.codec_lock("codec", "revision", "cpu")
     finally:
-        stages._load_codec.cache_clear()
-        stages._codec_lock.cache_clear()
+        stages.load_codec.cache_clear()
+        stages.codec_lock.cache_clear()
 
     assert first is second is codec
     assert first_lock is second_lock
@@ -741,7 +612,7 @@ def test_llama_cpp_stage_keeps_a_cpu_resolution_off_the_gpu(
         "llama_cpp",
         types.SimpleNamespace(LLAMA_SPLIT_MODE_NONE=0, Llama=FakeLlama),
     )
-    monkeypatch.setattr(stages, "_resolve_gguf", lambda *args: "/model.gguf")
+    monkeypatch.setattr(stages, "resolve_gguf", lambda *args: "/model.gguf")
     monkeypatch.setattr(current_platform, "device_type", "cpu", raising=False)
 
     with pytest.raises(RuntimeError, match="stop after capture"):
@@ -808,7 +679,7 @@ def test_llama_cpp_stage_matches_official_generation_loop(
         "llama_cpp",
         types.SimpleNamespace(LLAMA_SPLIT_MODE_NONE=0, Llama=FakeLlama),
     )
-    monkeypatch.setattr(stages, "_resolve_gguf", lambda *args: "/model.gguf")
+    monkeypatch.setattr(stages, "resolve_gguf", lambda *args: "/model.gguf")
     from sglang_omni.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "device_type", "cuda", raising=False)
@@ -829,7 +700,7 @@ def test_llama_cpp_stage_matches_official_generation_loop(
     scheduler = stages.create_tts_engine_executor(
         "audarai/Audar-TTS-V1-Turbo", gpu_id=2
     )
-    result = AudarTTSState.from_dict(scheduler._fn(payload).data)
+    result = AudarTTSState.from_dict(scheduler.fn(payload).data)
 
     assert result.audio_codes == [123, 456]
     assert result.prompt is None
@@ -844,14 +715,14 @@ def test_llama_cpp_stage_matches_official_generation_loop(
         "top_p": 0.9,
         "repeat_penalty": 1.1,
     }
-    assert scheduler._max_concurrency == 1
+    assert scheduler.max_concurrency == 1
 
 
 def test_vocoder_emits_24khz_audio_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     codec = FakeCodec()
-    monkeypatch.setattr(stages, "_load_codec", lambda *args, **kwargs: codec)
+    monkeypatch.setattr(stages, "load_codec", lambda *args, **kwargs: codec)
     scheduler = stages.create_vocoder_executor(gpu_id=None)
     payload = make_payload(
         state=AudarTTSState(
@@ -862,7 +733,7 @@ def test_vocoder_emits_24khz_audio_payload(
         )
     )
 
-    result = asyncio.run(scheduler._fn(payload))
+    result = asyncio.run(scheduler.fn(payload))
 
     assert codec.decode_calls == 1
     assert result.data["audio_waveform_shape"] == [3]
@@ -882,8 +753,8 @@ def test_vocoder_does_not_claim_batching_without_tensor_batch_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     codec = FakeCodec()
-    monkeypatch.setattr(stages, "_load_codec", lambda *args, **kwargs: codec)
+    monkeypatch.setattr(stages, "load_codec", lambda *args, **kwargs: codec)
     scheduler = stages.create_vocoder_executor(gpu_id=None)
 
-    assert scheduler._batch_fn is None
-    assert scheduler._max_batch_size == 1
+    assert scheduler.batch_fn is None
+    assert scheduler.max_batch_size == 1

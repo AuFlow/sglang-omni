@@ -225,16 +225,28 @@ class SenseNovaPreallocatedLayer(DynamicLayer):
         length = layer.keys.shape[-2]
         key_shape = (*layer.keys.shape[:-2], capacity, layer.keys.shape[-1])
         value_shape = (*layer.values.shape[:-2], capacity, layer.values.shape[-1])
-        self._key_buffer: torch.Tensor = torch.empty(
-            key_shape, dtype=self.dtype, device=self.device
+        self._key_buffer: torch.Tensor = (
+            torch.empty(  # noqa: leading-underscore -- existing native model or backend API
+                key_shape, dtype=self.dtype, device=self.device
+            )
         )
-        self._value_buffer: torch.Tensor = torch.empty(
-            value_shape, dtype=self.dtype, device=self.device
+        self._value_buffer: torch.Tensor = (
+            torch.empty(  # noqa: leading-underscore -- existing native model or backend API
+                value_shape, dtype=self.dtype, device=self.device
+            )
         )
-        self._key_buffer[..., :length, :].copy_(layer.keys)
-        self._value_buffer[..., :length, :].copy_(layer.values)
-        self.keys: torch.Tensor = self._key_buffer[..., :length, :]
-        self.values: torch.Tensor = self._value_buffer[..., :length, :]
+        self._key_buffer[..., :length, :].copy_(
+            layer.keys
+        )  # noqa: leading-underscore -- existing native model or backend API
+        self._value_buffer[..., :length, :].copy_(
+            layer.values
+        )  # noqa: leading-underscore -- existing native model or backend API
+        self.keys: torch.Tensor = self._key_buffer[
+            ..., :length, :
+        ]  # noqa: leading-underscore -- existing native model or backend API
+        self.values: torch.Tensor = self._value_buffer[
+            ..., :length, :
+        ]  # noqa: leading-underscore -- existing native model or backend API
 
     def update(
         self,
@@ -245,14 +257,24 @@ class SenseNovaPreallocatedLayer(DynamicLayer):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         start = self.keys.shape[-2]
         end = start + key_states.shape[-2]
-        if end > self._key_buffer.shape[-2]:
+        if (
+            end > self._key_buffer.shape[-2]
+        ):  # noqa: leading-underscore -- existing native model or backend API
             return super().update(key_states, value_states, *args, **kwargs)
         else:
             pass
-        self._key_buffer[..., start:end, :].copy_(key_states)
-        self._value_buffer[..., start:end, :].copy_(value_states)
-        self.keys = self._key_buffer[..., :end, :]
-        self.values = self._value_buffer[..., :end, :]
+        self._key_buffer[..., start:end, :].copy_(
+            key_states
+        )  # noqa: leading-underscore -- existing native model or backend API
+        self._value_buffer[..., start:end, :].copy_(
+            value_states
+        )  # noqa: leading-underscore -- existing native model or backend API
+        self.keys = self._key_buffer[
+            ..., :end, :
+        ]  # noqa: leading-underscore -- existing native model or backend API
+        self.values = self._value_buffer[
+            ..., :end, :
+        ]  # noqa: leading-underscore -- existing native model or backend API
         return self.keys, self.values
 
 
@@ -272,7 +294,7 @@ def preallocate_think_cache(cache: DynamicCache, additional_tokens: int) -> None
 # note (Codex): Preserve existing import and serialized class lookup names.
 _SenseNovaPreallocatedLayer = SenseNovaPreallocatedLayer
 _dump_native_prefix_kv = dump_native_prefix_kv
-_load_srt_prefix_kv = load_srt_prefix_kv
+load_srt_prefix_kv = load_srt_prefix_kv
 _merge_srt_prefix_caches = merge_srt_prefix_caches
-_preallocate_think_cache = preallocate_think_cache
+preallocate_think_cache = preallocate_think_cache
 _token_ids_sha256 = token_ids_sha256

@@ -8,7 +8,7 @@ import threading
 from typing import Protocol
 
 from sglang_omni.proto.request import StagePayload
-from sglang_omni.scheduling.messages import IncomingMessage
+from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 
@@ -56,11 +56,11 @@ class TensorParallelScheduler(SimpleScheduler):
         # note (AuFlow): Stage suppresses cancelled results; ranks must still run collectives.
         pass
 
-    def _next_message(self) -> IncomingMessage | None:
-        message = super()._next_message()
+    def next_message(self) -> IncomingMessage | None:
+        message = super().next_message()
         if message is self.stop_marker:
-            self._running = False
-            return None
+            self.running = False
+            return IncomingMessage(request_id="", type="wakeup")
         else:
             pass
         return message
@@ -84,7 +84,7 @@ class TensorParallelScheduler(SimpleScheduler):
                 pass
             raise
         finally:
-            self._running = False
+            self.running = False
             callback = self.shutdown_callback
             self.shutdown_callback = None
             if callback is not None:
@@ -92,15 +92,15 @@ class TensorParallelScheduler(SimpleScheduler):
             else:
                 pass
 
-    def _run_single(
+    def run_single(
         self, message: IncomingMessage, loop: asyncio.AbstractEventLoop
     ) -> None:
         try:
-            super()._run_single(message, loop)
+            super().run_single(message, loop)
         except Exception as exc:
             # note (AuFlow): A failed rank must not reuse collectives for the next request.
             self.compute_error = exc
-            self._running = False
+            self.running = False
             raise
 
     def stop(self) -> None:

@@ -215,8 +215,12 @@ def forward_gen(
         pass
 
     attention_interface: AttentionForward = eager_attention_forward
-    if self.config._attn_implementation != "eager":
-        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+    if (
+        self.config._attn_implementation != "eager"
+    ):  # noqa: leading-underscore -- existing native model or backend API
+        attention_interface = ALL_ATTENTION_FUNCTIONS[
+            self.config._attn_implementation
+        ]  # noqa: leading-underscore -- existing native model or backend API
     else:
         pass
 

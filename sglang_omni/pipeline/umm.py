@@ -1,354 +1,860 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Request-scoped interleaving above native model execution backends."""
+"""Interleaved (UMM) requests on the existing stage graph.
+
+A UMM request alternates between model phases, such as understanding,
+generation, and inspection of the generated media, until its adapter
+completes it. The controller is the scheduler of the entry stage, whose
+route_fn sends each dispatched phase to the stage configuration maps it to.
+The completed request goes to a terminal output stage in the controller's
+process, which also relays accepted segments to the client in order.
+"""
 
 from __future__ import annotations
 
-import copy
 import json
+import logging
 import math
+import queue
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Literal, Protocol
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from typing import ClassVar, Literal, Protocol, TypeAlias, runtime_checkable
 
 from sglang_omni.admission import QueueFullError
-from sglang_omni.proto.continuation import ContinuationToken, UMMSegment
+from sglang_omni.config.runtime import resolve_stage_typed_kwargs
+from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto.request import OmniRequest, StagePayload
-from sglang_omni.scheduling.messages import OutgoingMessage
+from sglang_omni.proto.session import SESSION_METADATA_KEY
+from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.utils.imports import import_string
+
+logger = logging.getLogger(__name__)
+
+JSONValue: TypeAlias = (
+    str | int | float | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
+)
+CloseReason = Literal["completed", "failed", "aborted", "expired", "shed", "shutdown"]
+# Request metadata key of the Continuation each controller output carries.
+CONTINUATION_METADATA_KEY = "omni_continuation"
+# A phase result reports context it produced under this data key, and the
+# consuming phase finds it under this request metadata key.
+CONTEXT_KEY = "umm_context"
+CONTROLLER_FACTORY_PATH = f"{__name__}.create_umm_controller"
+OUTPUT_FACTORY_PATH = f"{__name__}.create_umm_output_stage"
+ROUTE_FN_PATH = f"{__name__}.route_umm"
+STREAM_DONE_FN_PATH = f"{__name__}.umm_stream_done_targets"
 
 
 @dataclass(frozen=True)
-class UMMDecision:
-    kind: Literal["final", "generate"]
-    text: str = ""
-    generation: dict[str, Any] | None = None
+class Continuation:
+    """Where one controller output goes, and which result may advance it.
 
-    def __post_init__(self) -> None:
-        if self.kind not in ("final", "generate") or not isinstance(self.text, str):
-            raise ValueError("Invalid structured UMM decision")
-        if self.kind == "generate" and not isinstance(self.generation, dict):
-            raise ValueError("Generation decisions require a structured request")
-        if self.kind == "final" and self.generation is not None:
-            raise ValueError("Final decisions cannot dispatch generation")
+    A phase stage returns its result with the request it received, so the
+    continuation comes back in the request metadata. phase None marks the
+    completed request on its way to the output stage.
+    """
+
+    execution_id: str
+    index: int
+    phase: str | None
+    stage: str
+    nonce: str
 
 
 @dataclass(frozen=True)
+class ContextRef:
+    """Engine-owned context, such as KV pages, that one phase hands to the next.
+
+    The owner stage keeps the context and releases it when the consuming phase
+    finishes or the request aborts. The controller only routes this reference.
+    """
+
+    owner: str
+    key: str
+
+
+@dataclass(frozen=True)
+class UMMOutput:
+    kind: str
+    data: JSONValue
+
+
+@dataclass(frozen=True)
+class UMMStep:
+    """The adapter's choice after start and after every phase result.
+
+    phase None completes the request after publishing outputs.
+    """
+
+    phase: str | None = None
+    request: OmniRequest | None = None
+    outputs: tuple[UMMOutput, ...] = ()
+    context: ContextRef | None = None
+
+
+def limit_problems(limits: Mapping[str, object]) -> list[str]:
+    """Name each controller bound that is missing or out of range."""
+    problems = [
+        f"{name} must be a positive integer"
+        for name in (
+            "max_dispatches",
+            "max_outputs",
+            "max_active",
+            "max_retained_bytes",
+        )
+        if type(limits.get(name)) is not int or limits[name] <= 0
+    ]
+    timeout_s = limits.get("timeout_s")
+    if type(timeout_s) not in (int, float) or not 0 < timeout_s < math.inf:
+        problems.append("timeout_s must be a finite positive number")
+    else:
+        pass
+    return problems
+
+
+@dataclass(frozen=True, kw_only=True)
 class UMMLimits:
-    max_turns: int = 8
-    max_segments: int = 16
-    max_sessions: int = 32
-    max_context_bytes: int = 64 * 1024 * 1024
-    timeout_s: float = 3600.0
+    """Controller bounds, set by orchestrator factory arguments of the same names."""
+
+    max_dispatches: int
+    max_outputs: int
+    max_active: int
+    max_retained_bytes: int
+    timeout_s: float
 
     def __post_init__(self) -> None:
-        for name in ("max_turns", "max_segments", "max_sessions", "max_context_bytes"):
-            value = getattr(self, name)
-            if type(value) is not int or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-        if (
-            isinstance(self.timeout_s, bool)
-            or not isinstance(self.timeout_s, (int, float))
-            or not math.isfinite(self.timeout_s)
-            or self.timeout_s <= 0
-        ):
-            raise ValueError("timeout_s must be a finite positive number")
+        problems = limit_problems(vars(self))
+        if problems:
+            raise ValueError(". ".join(problems))
+        else:
+            pass
 
 
-class UMMAdapter(Protocol):
-    """Model-owned structured decisions and native input conversion."""
+@dataclass(eq=False)
+class UMMContext:
+    """Per-request view passed to every adapter callback.
 
-    def start(self, request: OmniRequest) -> Any: ...
+    Adapters read execution_id, request, deadline, remaining_dispatches,
+    outputs, and shedding without changing them, and end a request early
+    only through shed. The other fields belong to the controller.
+    """
 
-    def reasoner_request(self, history: Any, request: OmniRequest) -> OmniRequest: ...
-
-    def interpret_reasoner(self, result: Any) -> UMMDecision: ...
-
-    def generation_request(
-        self, decision: UMMDecision, request: OmniRequest
-    ) -> OmniRequest: ...
-
-    def incorporate_media(
-        self, history: Any, decision: UMMDecision, result: Any
-    ) -> Any: ...
-
-    def media_segments(self, result: Any) -> list[dict[str, Any]]: ...
-
-
-@dataclass
-class _Session:
-    session_id: str
+    execution_id: str
     request: OmniRequest
-    history: Any
     deadline: float
-    turn_index: int = 0
-    expected: ContinuationToken | None = None
-    decision: UMMDecision | None = None
-    segments: list[UMMSegment] = field(default_factory=list)
+    remaining_dispatches: int
+    outputs: list[dict[str, JSONValue]] = field(default_factory=list)
+    output_bytes: int = 0
+    produced: ContextRef | None = None
+    expected: Continuation | None = None
+    busy: bool = False
+    closed: CloseReason | None = None
+    shedding: bool = False
+
+    def shed(self) -> None:
+        """End this request because the deployment cannot finish it in time.
+
+        For an adapter whose plan shows the request can no longer finish
+        before its deadline, usually a waiting request other than the one it
+        advances. The controller's deadline sweep settles it once no
+        transition of it runs: the client gets the capacity error (HTTP 503,
+        which says to retry later), the stages abort its queued and running
+        phase work, and close runs once with reason shed. A request that
+        completes or closes first is unaffected.
+        """
+        self.shedding = True
 
 
-@dataclass(frozen=True)
-class _Discarded:
-    arrival_id: object | None
-    keep_active: bool
+@runtime_checkable
+class UMMAdapter(Protocol):
+    """Model-owned decisions. Shared code never interprets phase names.
+
+    An adapter keeps its per-request state keyed by execution_id, reports the
+    bytes of that state through usage as it grows, and releases it in close,
+    which the controller calls exactly once per request. start, advance, and
+    usage run on the controller thread one at a time. close of an aborted
+    request may run on the stage thread, never during that request's own
+    transition.
+    """
+
+    def start(self, context: UMMContext) -> UMMStep: ...
+
+    def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep: ...
+
+    def usage(self, context: UMMContext) -> int: ...
+
+    def close(self, context: UMMContext, reason: CloseReason) -> None: ...
 
 
-class UMMController(SimpleScheduler):
-    """Route bounded model turns using the existing stage scheduler contract.
+class MonotonicClock(Protocol):
+    def __call__(self) -> float: ...
 
-    Native stages retain compute, batching, cache and media-file ownership.
-    This controller only owns conversation state and accepted output segments.
+
+class UMMRequestError(ValueError):
+    """A client-caused UMM rejection, reported to the client as a bad request.
+
+    The serving error classifier recognizes the message prefix, which
+    survives stage IPC as text.
+    """
+
+    PREFIX = "Invalid UMM request: "
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(self.PREFIX + detail)
+
+
+class UMMDeadlineError(TimeoutError):
+    """A UMM request reached its timeout_s deadline. Its close reason is expired."""
+
+
+def encoded_bytes(output: UMMOutput) -> int:
+    if isinstance(output.data, str):
+        return len(output.data.encode("utf-8"))
+    else:
+        encoded = json.dumps(output.data, ensure_ascii=False, allow_nan=False)
+        return len(encoded.encode("utf-8"))
+
+
+class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
+    """Advance each request through adapter-chosen phases.
+
+    Native stages keep compute, batching, caches, and engine context. This
+    controller keeps only per-request identity, accepted outputs, and bounds.
     """
 
     def __init__(
         self,
         adapter: UMMAdapter,
         *,
-        limits: UMMLimits | None = None,
-        clock: Callable[[], float] = time.monotonic,
+        limits: UMMLimits,
+        phases: Mapping[str, str],
+        output_stage: str,
+        stage_name: str = "orchestrator",
+        clock: MonotonicClock = time.monotonic,
     ) -> None:
+        if not phases or not all(
+            isinstance(phase, str) and isinstance(stage, str)
+            for phase, stage in phases.items()
+        ):
+            raise ValueError("phases must map each adapter phase name to a stage")
+        else:
+            pass
         self.adapter = adapter
-        self.limits = limits or UMMLimits()
-        self._clock = clock
-        self._sessions: dict[str, _Session] = {}
-        self._session_lock = threading.RLock()
+        self.limits = limits
+        self.phases = dict(phases)
+        self.output_stage = output_stage
+        # Errors name the settings of this controller's own stage.
+        self.factory_prefix = f"stages.{stage_name}.factory"
+        self.clock = clock
+        self.contexts: dict[str, UMMContext] = {}
+        self.lock = threading.Lock()
         super().__init__(
-            self._advance,
-            abort_callback=self._forget,
-            shutdown_callback=self._forget_all,
+            self.advance,
+            abort_callback=self.forget,
+            shutdown_callback=self.forget_all,
         )
 
-    @property
-    def active_sessions(self) -> int:
-        with self._session_lock:
-            return len(self._sessions)
+    def close(self, context: UMMContext, reason: CloseReason) -> None:
+        try:
+            self.adapter.close(context, reason)
+        except Exception:
+            logger.exception(f"UMM adapter close failed for {context.execution_id}")
 
-    def _forget(self, request_id: str) -> None:
-        with self._session_lock:
-            self._sessions.pop(request_id, None)
-
-    def _forget_all(self) -> None:
-        with self._session_lock:
-            self._sessions.clear()
-
-    def _expire(self) -> None:
-        with self._session_lock:
-            now = self._clock()
-            expired = [
-                request_id
-                for request_id, session in self._sessions.items()
-                if now >= session.deadline
-            ]
-            for request_id in expired:
-                self._sessions.pop(request_id)
-                self._emit_error(
-                    request_id,
-                    TimeoutError("UMM session deadline exceeded"),
-                    self.outbox,
-                )
-
-    def validate_result(self, payload: StagePayload) -> bool:
-        """Revalidate a queued continuation before Stage forwards native work."""
-        if payload.continuation is None:
-            # Completed snapshots do not retain a live session or deadline.
-            return True
-        with self._session_lock:
-            session = self._sessions.get(payload.request_id)
-            if session is None or payload.continuation != session.expected:
+    def release(self, request_id: str, reason: CloseReason) -> bool:
+        with self.lock:
+            context = self.contexts.pop(request_id, None)
+            if context is None:
                 return False
-            if self._clock() >= session.deadline:
-                self._sessions.pop(payload.request_id)
-                self._emit_error(
-                    payload.request_id,
-                    TimeoutError("UMM session deadline exceeded"),
-                    self.outbox,
-                )
-                return False
-            return True
+            elif context.busy:
+                # The running transition closes it once the adapter returns.
+                context.closed = reason
+                return True
+            else:
+                pass
+        self.close(context, reason)
+        return True
 
-    def _next_message(self):
-        self._expire()
-        return super()._next_message()
+    def forget(self, request_id: str) -> None:
+        self.release(request_id, "aborted")
 
-    def _check_deadline(self, session: _Session) -> None:
-        if self._clock() >= session.deadline:
-            raise TimeoutError("UMM session deadline exceeded")
+    def forget_all(self) -> None:
+        with self.lock:
+            request_ids = list(self.contexts)
+        for request_id in request_ids:
+            self.release(request_id, "shutdown")
 
-    def _check_size(self, session: _Session, stage_request: OmniRequest | None) -> None:
-        state = {
-            "request": session.request.to_dict(),
-            "history": session.history,
-            "decision": asdict(session.decision) if session.decision else None,
-            "segments": [segment.to_dict() for segment in session.segments],
-            "stage_request": stage_request.to_dict() if stage_request else None,
-        }
-        # Measure the complete retained JSON representation, including repeated
-        # inline references. A byte budget is stronger than a media item limit.
-        size = len(
-            json.dumps(state, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    def budget_error(self, name: str, limit: int, *, client: bool) -> Exception:
+        # Before the first dispatch only the client's input exists, so a bound it
+        # crosses is a client error. Later breaches come from model output.
+        detail = (
+            f"UMM request exceeds {name}={limit}. "
+            f"Raise {self.factory_prefix}.{name} to allow more"
         )
-        if size > self.limits.max_context_bytes:
-            raise ValueError("UMM retained context exceeds max_context_bytes")
+        return UMMRequestError(detail) if client else RuntimeError(detail)
 
-    def _append_segment(self, session: _Session, kind: str, data: Any) -> None:
-        if len(session.segments) >= self.limits.max_segments:
-            raise ValueError("UMM output exceeds max_segments")
-        session.segments.append(
-            UMMSegment(
-                session_id=session.session_id,
-                segment_index=len(session.segments),
-                kind=kind,
-                data=copy.deepcopy(data),
-            )
+    def deadline_error(self) -> UMMDeadlineError:
+        return UMMDeadlineError(
+            f"UMM request deadline exceeded after timeout_s={self.limits.timeout_s}. "
+            f"Raise {self.factory_prefix}.timeout_s for longer requests"
         )
 
-    def _dispatch(
-        self, request_id: str, session: _Session, phase: str, request: OmniRequest
-    ) -> StagePayload:
-        if not isinstance(request, OmniRequest):
-            raise TypeError("UMM adapter must return an OmniRequest")
-        self._check_size(session, request)
-        self._check_deadline(session)
-        session.expected = ContinuationToken(
-            session_id=session.session_id,
-            turn_index=session.turn_index,
-            phase=phase,
-            nonce=uuid.uuid4().hex,
-        )
-        return StagePayload(
-            request_id=request_id,
-            request=request,
-            data=request.inputs,
-            continuation=session.expected,
+    def shed_error(self) -> QueueFullError:
+        # Starts with QueueFullError.MESSAGE, so it classifies as a full queue.
+        return QueueFullError(
+            f"{QueueFullError.MESSAGE} The UMM request was ended before its "
+            f"timeout_s={self.limits.timeout_s} deadline because this deployment "
+            "cannot finish it in time at its current load. Retry it later, or "
+            f"raise {self.factory_prefix}.timeout_s or add serving capacity"
         )
 
-    def _advance(self, payload: StagePayload) -> StagePayload | _Discarded:
-        if not isinstance(payload, StagePayload):
-            raise TypeError("UMM controller requires a StagePayload")
-        request_id = payload.request_id
-        with self._session_lock:
-            session = self._sessions.get(request_id)
-            token = payload.continuation
-            if token is None:
-                if session is not None:
-                    return _Discarded(payload.arrival_id, keep_active=True)
-                if len(self._sessions) >= self.limits.max_sessions:
-                    raise QueueFullError()
-                deadline = self._clock() + self.limits.timeout_s
-                request = copy.deepcopy(payload.request)
-                session = _Session(
-                    session_id=uuid.uuid4().hex,
-                    request=request,
-                    history=self.adapter.start(request),
-                    deadline=deadline,
-                )
-                self._sessions[request_id] = session
-            elif session is None or token != session.expected:
-                return _Discarded(payload.arrival_id, keep_active=session is not None)
+    def check_deadline(self, context: UMMContext) -> None:
+        if self.clock() >= context.deadline:
+            raise self.deadline_error()
+        else:
+            pass
 
-            first_segment = len(session.segments)
-            try:
-                self._check_deadline(session)
-                if token is None:
-                    result = self._dispatch(
-                        request_id,
-                        session,
-                        "reasoner",
-                        self.adapter.reasoner_request(session.history, session.request),
-                    )
-                elif token.phase == "reasoner":
-                    decision = self.adapter.interpret_reasoner(payload.data)
-                    if not isinstance(decision, UMMDecision):
-                        raise TypeError("UMM adapter must return a UMMDecision")
-                    session.expected = None
-                    if decision.text:
-                        self._append_segment(session, "text", decision.text)
-                    if decision.kind == "final":
-                        self._check_size(session, None)
-                        result = StagePayload(
-                            request_id=request_id,
-                            request=session.request,
-                            data={
-                                "session_id": session.session_id,
-                                "text": "".join(
-                                    segment.data
-                                    for segment in session.segments
-                                    if segment.kind == "text"
-                                ),
-                                "segments": [
-                                    segment.to_dict() for segment in session.segments
-                                ],
-                                "finish_reason": "stop",
-                            },
-                        )
-                        self._sessions.pop(request_id)
-                    else:
-                        if session.turn_index >= self.limits.max_turns:
-                            raise ValueError("UMM generation exceeds max_turns")
-                        session.decision = decision
-                        result = self._dispatch(
-                            request_id,
-                            session,
-                            "generation",
-                            self.adapter.generation_request(decision, session.request),
-                        )
+    def expire(self) -> float | None:
+        """Fail each waiting request that reached its deadline or was shed.
+
+        Returns the seconds until the earliest deadline of a request left
+        waiting, or None when no request waits.
+        """
+        now = self.clock()
+        ended: list[tuple[str, UMMContext]] = []
+        earliest = math.inf
+        with self.lock:
+            for request_id, context in self.contexts.items():
+                if context.busy:
+                    pass
+                elif now >= context.deadline or context.shedding:
+                    ended.append((request_id, context))
+                elif context.deadline < earliest:
+                    earliest = context.deadline
                 else:
-                    assert session.decision is not None
-                    media_segments = self.adapter.media_segments(payload.data)
-                    if not isinstance(media_segments, list) or not media_segments:
-                        raise ValueError("UMM generation returned no media segments")
-                    for segment in media_segments:
-                        self._append_segment(session, segment["kind"], segment["data"])
-                    session.history = self.adapter.incorporate_media(
-                        session.history, session.decision, payload.data
-                    )
-                    session.decision = None
-                    session.turn_index += 1
-                    result = self._dispatch(
-                        request_id,
-                        session,
-                        "reasoner",
-                        self.adapter.reasoner_request(session.history, session.request),
-                    )
-                self._check_deadline(session)
-                # Publish only after validation of the entire transition. The
-                # serial scheduler queues these before its routed result.
-                if session.request.params.get("stream", False):
-                    for segment in session.segments[first_segment:]:
-                        self.outbox.put(
-                            OutgoingMessage(
-                                request_id=request_id,
-                                type="stream",
-                                data=segment.to_dict(),
-                                metadata={"modality": segment.kind},
-                            )
-                        )
-                result.arrival_id = payload.arrival_id
-                return result
-            except Exception:
-                self._sessions.pop(request_id, None)
-                raise
+                    pass
+        for request_id, context in ended:
+            shed = context.shedding
+            if self.release(request_id, "shed" if shed else "expired"):
+                # The request waits at a phase stage, so this stage stopped
+                # tracking it. Admitting it again lets the stage report the
+                # failure, which aborts the phase everywhere.
+                self.outbox.put(OutgoingMessage(request_id, "admitted"))
+                error = self.shed_error() if shed else self.deadline_error()
+                self.emit_error(request_id, error, self.outbox)
+            else:
+                pass
+        return None if earliest == math.inf else earliest - now
+
+    def next_message(self) -> IncomingMessage | None:
+        while True:
+            wait = self.expire()
+            if wait is None or self.pending_messages:
+                return super().next_message()
+            else:
+                pass
+            # The earliest deadline bounds the wait, so the sweep fails that
+            # request on time whether or not the scheduler loop polls. Waits
+            # stop at the longest timeout the platform accepts.
+            try:
+                return self.inbox.get(timeout=min(wait, threading.TIMEOUT_MAX))
+            except queue.Empty:
+                pass
+
+    def stop(self) -> None:
+        super().stop()
+        # A wait bounded by a deadline would otherwise last until that
+        # deadline, so stop releases it.
+        self.inbox.put(IncomingMessage("", "wakeup"))
 
     @staticmethod
-    def _emit_result(request_id, result, outbox) -> None:
-        if isinstance(result, _Discarded):
-            outbox.put(
-                OutgoingMessage(
-                    request_id=request_id,
-                    type="discard",
-                    metadata={
-                        "arrival_id": result.arrival_id,
-                        "keep_active": result.keep_active,
-                    },
+    def emit_result(
+        request_id: str,
+        result: StagePayload | None,
+        outbox: queue.Queue[OutgoingMessage],
+    ) -> None:
+        # None is a stale continuation or an already reported rejection.
+        if result is not None:
+            SimpleScheduler.emit_result(request_id, result, outbox)
+        else:
+            pass
+
+    def admit(self, payload: StagePayload) -> UMMContext:
+        if SESSION_METADATA_KEY in payload.request.metadata:
+            raise UMMRequestError(
+                "UMM pipelines do not support session operations. "
+                "Submit ordinary requests instead"
+            )
+        elif len(self.contexts) >= self.limits.max_active:
+            raise QueueFullError()
+        else:
+            pass
+        context = UMMContext(
+            execution_id=uuid.uuid4().hex,
+            request=payload.request,
+            deadline=self.clock() + self.limits.timeout_s,
+            remaining_dispatches=self.limits.max_dispatches,
+        )
+        self.contexts[payload.request_id] = context
+        return context
+
+    def advance(self, payload: StagePayload) -> StagePayload | None:
+        try:
+            return self.transition(payload)
+        except (QueueFullError, UMMRequestError) as exc:
+            # Rejections of client requests are expected and need no traceback.
+            self.emit_error(payload.request_id, exc, self.outbox)
+            return None
+
+    def transition(self, payload: StagePayload) -> StagePayload | None:
+        request_id = payload.request_id
+        token = payload.request.metadata.get(CONTINUATION_METADATA_KEY)
+        if not isinstance(token, Continuation):
+            token = None
+        else:
+            pass
+        phase = None
+        lost = False
+        with self.lock:
+            context = self.contexts.get(request_id)
+            if context is None and token is None:
+                context = self.admit(payload)
+            elif context is None:
+                raise RuntimeError(
+                    f"UMM result for inactive request {request_id} was discarded"
                 )
+            elif token is None:
+                self.contexts.pop(request_id)
+                lost = True
+            elif token != context.expected:
+                # A duplicate or stale continuation never advances the request.
+                return None
+            else:
+                phase = token.phase
+            if not lost:
+                context.expected = None
+                context.busy = True
+            else:
+                pass
+        if lost:
+            self.close(context, "failed")
+            raise RuntimeError(
+                f"A phase result for live UMM request {request_id} lost its "
+                "continuation. Phase stages must return the request they received"
             )
         else:
-            SimpleScheduler._emit_result(request_id, result, outbox)
+            pass
+        try:
+            self.check_deadline(context)
+            if phase is None:
+                step = self.adapter.start(context)
+            else:
+                data = payload.data
+                context.produced = (
+                    data.get(CONTEXT_KEY) if isinstance(data, Mapping) else None
+                )
+                step = self.adapter.advance(context, phase, data)
+            result, added = self.apply(request_id, context, step, client=phase is None)
+            self.check_deadline(context)
+        except BaseException as exc:
+            with self.lock:
+                context.busy = False
+                if self.contexts.get(request_id) is context:
+                    self.contexts.pop(request_id)
+                else:
+                    pass
+            reason: CloseReason = (
+                "expired" if isinstance(exc, UMMDeadlineError) else "failed"
+            )
+            self.close(context, context.closed or reason)
+            raise
+        with self.lock:
+            context.busy = False
+            live = self.contexts.get(request_id) is context
+            if live and step.phase is None:
+                self.contexts.pop(request_id)
+            elif live:
+                context.expected = result.request.metadata[CONTINUATION_METADATA_KEY]
+            else:
+                pass
+        if not live:
+            self.close(context, context.closed or "aborted")
+            return None
+        else:
+            pass
+        # Publish only after the whole transition validated. The serial
+        # scheduler queues these before its routed result.
+        if context.request.params.get("stream", False):
+            for segment in added:
+                self.outbox.put(
+                    OutgoingMessage(
+                        request_id=request_id,
+                        type="stream",
+                        data=segment,
+                        metadata={"modality": segment["kind"]},
+                    )
+                )
+        else:
+            pass
+        if step.phase is None:
+            self.close(context, "completed")
+        else:
+            pass
+        return result
+
+    def apply(
+        self, request_id: str, context: UMMContext, step: UMMStep, *, client: bool
+    ) -> tuple[StagePayload, list[dict[str, JSONValue]]]:
+        limits = self.limits
+        if not isinstance(step, UMMStep):
+            raise TypeError("UMM adapter must return a UMMStep")
+        elif context.produced is not None and step.context != context.produced:
+            raise RuntimeError(
+                f"UMM adapter left context from stage {context.produced.owner!r} "
+                "unconsumed. Pass it to the next phase so its owner releases it"
+            )
+        elif len(context.outputs) + len(step.outputs) > limits.max_outputs:
+            raise self.budget_error("max_outputs", limits.max_outputs, client=client)
+        else:
+            pass
+        retained = context.output_bytes + sum(
+            encoded_bytes(output) for output in step.outputs
+        )
+        state_bytes = self.adapter.usage(context)
+        if type(state_bytes) is not int or state_bytes < 0:
+            raise TypeError("UMM adapter usage must return a byte count")
+        elif retained + state_bytes > limits.max_retained_bytes:
+            raise self.budget_error(
+                "max_retained_bytes", limits.max_retained_bytes, client=client
+            )
+        elif step.phase is None and (
+            step.request is not None or step.context is not None
+        ):
+            raise ValueError("A completing UMM step dispatches no request")
+        elif step.phase is None:
+            stage = self.output_stage
+        elif step.request is None:
+            raise ValueError(f"UMM step for phase {step.phase!r} has no request")
+        elif context.remaining_dispatches <= 0:
+            raise self.budget_error(
+                "max_dispatches", limits.max_dispatches, client=False
+            )
+        elif step.phase not in self.phases:
+            raise ValueError(
+                f"UMM adapter chose unmapped phase {step.phase!r}. "
+                f"Map it in {self.factory_prefix}.phases"
+            )
+        else:
+            stage = self.phases[step.phase]
+        added: list[dict[str, JSONValue]] = [
+            {
+                "type": "segment",
+                "execution_id": context.execution_id,
+                "segment_index": len(context.outputs) + offset,
+                "kind": output.kind,
+                "data": output.data,
+            }
+            for offset, output in enumerate(step.outputs)
+        ]
+        context.outputs.extend(added)
+        context.output_bytes = retained
+        context.produced = None
+        continuation = Continuation(
+            execution_id=context.execution_id,
+            index=limits.max_dispatches - context.remaining_dispatches,
+            phase=step.phase,
+            stage=stage,
+            nonce=uuid.uuid4().hex,
+        )
+        if step.phase is None:
+            streamed = bool(context.request.params.get("stream", False))
+            request = replace(
+                context.request,
+                metadata={
+                    **context.request.metadata,
+                    CONTINUATION_METADATA_KEY: continuation,
+                },
+            )
+            result = {
+                "type": "umm_result",
+                "execution_id": context.execution_id,
+                # A streamed request already received each segment with its data.
+                "segments": [
+                    (
+                        {
+                            name: value
+                            for name, value in segment.items()
+                            if name != "data"
+                        }
+                        if streamed
+                        else segment
+                    )
+                    for segment in context.outputs
+                ],
+                "finish_reason": "stop",
+            }
+            return StagePayload(request_id, request, result), added
+        else:
+            pass
+        context.remaining_dispatches -= 1
+        metadata = {**step.request.metadata, CONTINUATION_METADATA_KEY: continuation}
+        if step.context is not None:
+            metadata[CONTEXT_KEY] = step.context
+        else:
+            pass
+        # Phases never stream. The controller publishes accepted outputs.
+        request = replace(
+            step.request,
+            params={**step.request.params, "stream": False},
+            metadata=metadata,
+        )
+        return StagePayload(request_id, request, request.inputs), added
 
 
-def route_umm(request_id: str, payload: StagePayload) -> str | None:
-    """Select only the phase attested by the controller's continuation token."""
-    if payload.request_id != request_id:
-        raise ValueError("UMM routed request identity mismatch")
-    return payload.continuation.phase if payload.continuation else None
+class UMMOutputRelay:
+    """Scheduler of the UMM output stage.
+
+    Forwards accepted segments to the client as they arrive and completes the
+    request with the final payload. It keeps no per-request state, so aborts
+    and failures leave nothing to release here.
+    """
+
+    def __init__(self) -> None:
+        self.inbox: queue.Queue[IncomingMessage] = queue.Queue()
+        self.outbox: queue.Queue[OutgoingMessage] = queue.Queue()
+        self.running = False
+
+    def warm_up_serving_thread(self) -> None:
+        """Keep the scheduler contract. The relay has nothing to warm."""
+
+    def start(self) -> None:
+        self.running = True
+        while self.running:
+            try:
+                message = self.inbox.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if message.type == "stream_chunk":
+                item = message.data
+                assert isinstance(item, StreamItem), "stages deliver StreamItem chunks"
+                self.outbox.put(
+                    OutgoingMessage(
+                        request_id=message.request_id,
+                        type="stream",
+                        data=item.data,
+                        metadata=item.metadata,
+                    )
+                )
+            elif message.type == "new_request":
+                self.outbox.put(
+                    OutgoingMessage(
+                        request_id=message.request_id,
+                        type="result",
+                        data=message.data,
+                    )
+                )
+            else:
+                pass  # A stream end carries nothing to relay.
+
+    def stop(self) -> None:
+        self.running = False
+
+    def abort(self, request_id: str) -> None:
+        """Keep the scheduler contract. The relay holds nothing per request."""
+
+
+def create_umm_controller(
+    model_path: str,
+    *,
+    adapter: str,
+    phases: Mapping[str, str],
+    output_stage: str,
+    max_dispatches: int,
+    max_outputs: int,
+    max_active: int,
+    max_retained_bytes: int,
+    timeout_s: float,
+    stage_name: str = "orchestrator",
+) -> UMMController:
+    """Build the controller around the adapter of the model being served.
+
+    adapter is the import path of a callable that takes model_path and
+    returns the model's UMMAdapter. stage_name is the controller's stage,
+    which UMMPipelineConfig passes so that errors name its settings.
+    """
+    adapter_factory = import_string(adapter)
+    if not callable(adapter_factory):
+        raise TypeError(f"UMM adapter factory {adapter!r} is not callable")
+    else:
+        pass
+    model_adapter = adapter_factory(model_path)
+    if not isinstance(model_adapter, UMMAdapter):
+        raise TypeError(f"{adapter!r} did not return a UMMAdapter")
+    else:
+        pass
+    return UMMController(
+        model_adapter,
+        limits=UMMLimits(
+            max_dispatches=max_dispatches,
+            max_outputs=max_outputs,
+            max_active=max_active,
+            max_retained_bytes=max_retained_bytes,
+            timeout_s=timeout_s,
+        ),
+        phases=phases,
+        output_stage=output_stage,
+        stage_name=stage_name,
+    )
+
+
+def create_umm_output_stage() -> UMMOutputRelay:
+    return UMMOutputRelay()
+
+
+def route_umm(request_id: str, payload: StagePayload) -> str:
+    """Send a controller output to the stage its continuation names."""
+    continuation = payload.request.metadata.get(CONTINUATION_METADATA_KEY)
+    if not isinstance(continuation, Continuation):
+        raise TypeError(f"UMM output for {request_id} carries no continuation")
+    else:
+        pass
+    return continuation.stage
+
+
+def umm_stream_done_targets(request_id: str, payload: StagePayload) -> None:
+    """Keep the stream_done_to_fn contract and send no stream end.
+
+    The output stage forwards each segment as it arrives and completes on
+    the final payload, so no controller visit ends a stream.
+    """
+
+
+class UMMPipelineConfig(PipelineConfig):
+    """Base of pipelines whose entry stage is a UMM controller.
+
+    The controller stage uses create_umm_controller, route_fn route_umm,
+    stream_done_to_fn umm_stream_done_targets, stream_to the output stage,
+    and next naming the output stage and every phase stage, whose own next is
+    the controller and which streams nowhere. The output stage is terminal,
+    uses create_umm_output_stage, accepts streams before its payload, and
+    shares the controller's process.
+    """
+
+    umm_controller_stage: ClassVar[str] = "orchestrator"
+    umm_output_stage: ClassVar[str] = "output"
+    interleaved_output: ClassVar[bool] = True
+
+    @classmethod
+    def process_local_edges(cls) -> frozenset[tuple[str, str]]:
+        # Segments reach the output stage as local objects.
+        return frozenset({(cls.umm_controller_stage, cls.umm_output_stage)})
+
+    def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
+        if stage_name == type(self).umm_controller_stage:
+            return {
+                "output_stage": type(self).umm_output_stage,
+                "stage_name": stage_name,
+            }
+        else:
+            return super().stage_factory_kwargs(stage_name)
+
+    def entry_stage_admission_limit(self) -> int:
+        controller = self.stage_named(type(self).umm_controller_stage)
+        max_active = resolve_stage_typed_kwargs(controller)["max_active"]
+        assert type(max_active) is int, "model_post_init validates max_active"
+        return max_active
+
+    def model_post_init(self, __context: object = None) -> None:
+        super().model_post_init(__context)
+        cls = type(self)
+        controller_name = cls.umm_controller_stage
+        output_name = cls.umm_output_stage
+        stages = {stage.name: stage for stage in self.stages}
+        controller = stages.get(controller_name)
+        output = stages.get(output_name)
+        if controller is None or output is None:
+            raise ValueError(
+                f"UMM pipeline needs stages {controller_name!r} and {output_name!r}"
+            )
+        else:
+            pass
+        factory_args = resolve_stage_typed_kwargs(controller)
+        phases = factory_args.get("phases")
+        phase_targets = list(phases.values()) if isinstance(phases, Mapping) else []
+        phase_stages = {name for name in phase_targets if isinstance(name, str)}
+        streaming_phase_stages = sorted(
+            name for name in phase_stages if name in stages and stages[name].stream_to
+        )
+        if isinstance(controller.next, list):
+            next_stages = set(controller.next)
+        else:
+            next_stages = {controller.next}
+        prefix = f"stages.{controller_name}"
+        problems = [
+            message
+            for holds, message in (
+                (
+                    self.resolved_entry_stage == controller_name,
+                    f"entry_stage must be {controller_name!r}",
+                ),
+                (
+                    controller.factory_path == CONTROLLER_FACTORY_PATH,
+                    f"{prefix}.factory_path must be {CONTROLLER_FACTORY_PATH}",
+                ),
+                (
+                    controller.route_fn == ROUTE_FN_PATH,
+                    f"{prefix}.route_fn must be {ROUTE_FN_PATH}",
+                ),
+                (
+                    controller.stream_done_to_fn == STREAM_DONE_FN_PATH,
+                    f"{prefix}.stream_done_to_fn must be {STREAM_DONE_FN_PATH}",
+                ),
+                (
+                    controller.stream_to == [output_name],
+                    f"{prefix}.stream_to must be [{output_name!r}]",
+                ),
+                (
+                    bool(phase_targets)
+                    and all(
+                        isinstance(name, str)
+                        and name in stages
+                        and name not in (controller_name, output_name)
+                        and stages[name].next in (controller_name, [controller_name])
+                        for name in phase_targets
+                    ),
+                    f"{prefix}.factory.phases must map each phase to a stage "
+                    f"whose next is {controller_name!r}",
+                ),
+                (
+                    {output_name, *phase_stages} <= next_stages,
+                    f"{prefix}.next must name {output_name!r} and every stage in "
+                    "factory.phases",
+                ),
+                (
+                    not streaming_phase_stages,
+                    ", ".join(
+                        f"stages.{name}.stream_to" for name in streaming_phase_stages
+                    )
+                    + " must be empty, since the controller streams accepted outputs",
+                ),
+                (
+                    factory_args.get("output_stage", output_name) == output_name,
+                    f"{prefix}.factory.output_stage must stay unset",
+                ),
+                (
+                    output.terminal
+                    and output.factory_path == OUTPUT_FACTORY_PATH
+                    and output.can_accept_stream_before_payload,
+                    f"stages.{output_name} must be terminal, use "
+                    f"{OUTPUT_FACTORY_PATH}, and accept streams before its payload",
+                ),
+            )
+            if not holds
+        ] + [f"{prefix}.factory.{problem}" for problem in limit_problems(factory_args)]
+        if problems:
+            raise ValueError("Invalid UMM pipeline. " + ". ".join(problems))
+        else:
+            pass

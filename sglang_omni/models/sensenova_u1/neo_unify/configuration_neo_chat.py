@@ -17,7 +17,9 @@ from sglang_omni.models.sensenova_u1.neo_unify.configuration_neo_vit import (
 logger = logging.getLogger(__name__)
 
 
-def _restore_legacy_rope_theta(config: Qwen3Config | Qwen3MoeConfig) -> None:
+def _restore_legacy_rope_theta(
+    config: Qwen3Config | Qwen3MoeConfig,
+) -> None:  # noqa: leading-underscore -- existing native model or backend API
     """Expose the v4 rope attribute expected by the vendored model code."""
     if hasattr(config, "rope_theta"):
         return
@@ -37,7 +39,9 @@ class NEOLLMConfig(Qwen3Config):
         **kwargs: JsonValue,
     ) -> None:
         super().__init__(**kwargs)
-        _restore_legacy_rope_theta(self)
+        _restore_legacy_rope_theta(
+            self
+        )  # noqa: leading-underscore -- existing native model or backend API
         self.rope_theta_hw: float = rope_theta_hw
         self.max_position_embeddings_hw: int = max_position_embeddings_hw
 
@@ -55,7 +59,9 @@ class NEOMoELLMConfig(Qwen3MoeConfig):
         **kwargs: JsonValue,
     ) -> None:
         super().__init__(**kwargs)
-        _restore_legacy_rope_theta(self)
+        _restore_legacy_rope_theta(
+            self
+        )  # noqa: leading-underscore -- existing native model or backend API
         self.rope_theta_hw: float = rope_theta_hw
         self.max_position_embeddings_hw: int = max_position_embeddings_hw
 
@@ -94,7 +100,7 @@ class NEOMoELLMConfig(Qwen3MoeConfig):
             pass
 
 
-def _is_moe_llm_config(
+def _is_moe_llm_config(  # noqa: leading-underscore -- existing native model or backend API
     llm_config: dict[str, JsonValue] | Qwen3Config | Qwen3MoeConfig
 ) -> bool:
     """Detect whether an llm_config (dict or object) targets a MoE backbone."""
@@ -125,12 +131,14 @@ def _is_moe_llm_config(
     return bool(has_num_experts and num_experts and int(num_experts) > 1)
 
 
-def _build_llm_config(
+def _build_llm_config(  # noqa: leading-underscore -- existing native model or backend API
     llm_config: dict[str, JsonValue] | NEOLLMConfig | NEOMoELLMConfig
 ) -> NEOLLMConfig | NEOMoELLMConfig:
     """Instantiate the right LLM config object from a dict or pre-built config."""
     if isinstance(llm_config, dict):
-        if _is_moe_llm_config(llm_config):
+        if _is_moe_llm_config(
+            llm_config
+        ):  # noqa: leading-underscore -- existing native model or backend API
             return NEOMoELLMConfig(**llm_config)
         else:
             pass
@@ -180,7 +188,9 @@ class NEOChatConfig(PretrainedConfig):
         else:
             self.vision_config = vision_config
 
-        self.llm_config: NEOLLMConfig | NEOMoELLMConfig = _build_llm_config(llm_config)
+        self.llm_config: NEOLLMConfig | NEOMoELLMConfig = _build_llm_config(
+            llm_config
+        )  # noqa: leading-underscore -- existing native model or backend API
 
         self.use_backbone_lora: int = use_backbone_lora
         self.use_llm_lora: int = use_llm_lora

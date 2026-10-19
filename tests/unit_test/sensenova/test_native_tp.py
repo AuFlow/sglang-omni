@@ -20,7 +20,7 @@ from sglang_omni.models.sensenova_u1.neo_unify.modeling_qwen3 import (
 from sglang_omni.models.sensenova_u1.tensor_parallel import apply_tensor_parallel
 
 
-def _native_parity(rank, rendezvous, dtype):
+def native_parity(rank, rendezvous, dtype):
     torch.set_num_threads(1)
     dist.init_process_group(
         "gloo",
@@ -46,7 +46,9 @@ def _native_parity(rank, rendezvous, dtype):
             rms_norm_eps=1e-6,
         )
         config.layer_types = ["full_attention"] * 2
-        config._attn_implementation = "eager"
+        config._attn_implementation = (
+            "eager"  # noqa: leading-underscore -- existing native model or backend API
+        )
         reference = nn.Module()
         reference.language_model = Qwen3ForCausalLM(config).eval().to(dtype)
         sharded = copy.deepcopy(reference)
@@ -101,7 +103,7 @@ def _native_parity(rank, rendezvous, dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_native_qwen3_prefix_and_image_denoising_tp_parity(tmp_path, dtype):
     mp.spawn(
-        _native_parity,
+        native_parity,
         args=((tmp_path / "rendezvous").as_uri(), dtype),
         nprocs=2,
         join=True,

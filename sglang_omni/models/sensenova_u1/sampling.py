@@ -30,7 +30,7 @@ class SenseNovaU1Sampling:
             pass
         enable_cache_dit, cache_dit_params = cache_dit_values(params)
         return cls(
-            **_validated_values(cls, {**params, "n": 1}, ("guidance_scale",)),
+            **validated_values(cls, {**params, "n": 1}, ("guidance_scale",)),
             n=n,
             enable_cache_dit=enable_cache_dit,
             cache_dit_params=cache_dit_params,
@@ -72,7 +72,7 @@ class SenseNovaU1ImageEditSampling:
             raise ValueError("size_explicit must be a boolean")
         else:
             pass
-        values = _validated_values(cls, params, ("guidance_scale", "img_cfg_scale"))
+        values = validated_values(cls, params, ("guidance_scale", "img_cfg_scale"))
         cache_options = dict(params)
         if (
             image_guidance_branch_count(
@@ -94,7 +94,7 @@ class SenseNovaU1ImageEditSampling:
         )
 
 
-def _validated_values(
+def validated_values(
     defaults: type[SenseNovaU1Sampling | SenseNovaU1ImageEditSampling],
     params: dict[str, JsonValue],
     scale_names: tuple[str, ...],

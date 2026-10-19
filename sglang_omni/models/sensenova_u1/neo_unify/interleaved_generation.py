@@ -137,8 +137,10 @@ def interleave_gen(
         return query
 
     query_cond = replace_image_tokens(query_cond, grid_hw)
-    input_embeds_cond, indexes_cond, attention_mask_cond = self._build_it2i_inputs(
-        tokenizer, query_cond, pv_tensor, ghw_tensor
+    input_embeds_cond, indexes_cond, attention_mask_cond = (
+        self._build_it2i_inputs(  # noqa: leading-underscore -- existing native model or backend API
+            tokenizer, query_cond, pv_tensor, ghw_tensor
+        )
     )
 
     outputs_cond = self.language_model(
@@ -158,8 +160,10 @@ def interleave_gen(
     query_text_uncond = template_tu.get_prompt()
     query_text_uncond = replace_image_tokens(query_text_uncond, grid_hw)
 
-    input_embeds_tu, indexes_tu, attention_mask_tu = self._build_it2i_inputs(
-        tokenizer, query_text_uncond, pv_tensor, ghw_tensor
+    input_embeds_tu, indexes_tu, attention_mask_tu = (
+        self._build_it2i_inputs(  # noqa: leading-underscore -- existing native model or backend API
+            tokenizer, query_text_uncond, pv_tensor, ghw_tensor
+        )
     )
     outputs_tu = self.language_model(
         inputs_embeds=input_embeds_tu,
@@ -170,9 +174,13 @@ def interleave_gen(
     past_key_values_tu = outputs_tu.past_key_values
     t_index_tu = indexes_tu[0].max().item()
 
-    query_img_uncond = self._build_t2i_query("", append_text=IMG_START_TOKEN)
-    input_embeds_iu, indexes_iu, attention_mask_iu = self._build_it2i_inputs(
-        tokenizer, query_img_uncond
+    query_img_uncond = self._build_t2i_query(
+        "", append_text=IMG_START_TOKEN
+    )  # noqa: leading-underscore -- existing native model or backend API
+    input_embeds_iu, indexes_iu, attention_mask_iu = (
+        self._build_it2i_inputs(  # noqa: leading-underscore -- existing native model or backend API
+            tokenizer, query_img_uncond
+        )
     )
     outputs_iu = self.language_model(
         inputs_embeds=input_embeds_iu,

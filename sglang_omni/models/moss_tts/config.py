@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import ClassVar
 
 from pydantic import Field
@@ -20,6 +21,36 @@ _REF_AUDIO_CACHE_MAX_BYTES = 64 * 1024 * 1024
 _COLOCATED_PREPROCESSING_GPU_MEMORY_FRACTION = 0.10
 _COLOCATED_AR_GPU_MEMORY_FRACTION = 0.72
 _COLOCATED_VOCODER_GPU_MEMORY_FRACTION = 0.18
+
+
+def uses_rocm_wsl_dxg() -> bool:
+    """Return whether PyTorch HIP can select the WSL DXG device path."""
+    try:
+        import torch
+    except ImportError:
+        return False
+    return (
+        torch.version.hip is not None
+        and os.environ.get("HSA_ENABLE_DXG_DETECTION") != "0"
+        and os.path.exists("/dev/dxg")
+    )
+
+
+def resolve_vocoder_cuda_graph(vocoder_cuda_graph: bool | None) -> bool:
+    """Resolve the platform default and reject an unsafe DXG opt-in."""
+    if not uses_rocm_wsl_dxg():
+        return True if vocoder_cuda_graph is None else vocoder_cuda_graph
+    else:
+        pass
+    if vocoder_cuda_graph is True:
+        raise ValueError(
+            "MOSS-TTS Local vocoder CUDA graphs cannot be enabled on ROCm "
+            "WSL/DXG because HIP graph capture can abort the process; omit "
+            "vocoder_cuda_graph or set it to false"
+        )
+    else:
+        pass
+    return False
 
 
 class MossTTSPreprocessingFactoryArgs(FactoryArgs):
@@ -47,7 +78,7 @@ class MossTTSVocoderStageConfig(StageConfig):
     )
 
 
-def _stages(*, colocated: bool) -> list[StageConfig]:
+def stages(*, colocated: bool) -> list[StageConfig]:
     # Note (Jiaxin Deng): the vocoder's Python decode loop shares the interpreter
     # with the AR scheduler when both live in one process; on H200 isolating it
     # lifts single-replica throughput by ~70% at every concurrency cap.
@@ -122,7 +153,7 @@ class MossTTSPipelineConfig(PipelineConfig):
         # PreparedRequestQueue that the AR stage pops in-process.
         return frozenset({("preprocessing", "tts_engine")})
 
-    stages: list[StageConfig] = Field(default_factory=lambda: _stages(colocated=True))
+    stages: list[StageConfig] = Field(default_factory=lambda: stages(colocated=True))
 
     def supports_uploaded_voice_references(self) -> bool:
         return True
@@ -131,7 +162,7 @@ class MossTTSPipelineConfig(PipelineConfig):
 class MossTTSSingleProcessPipelineConfig(MossTTSPipelineConfig):
     """All three stages in one process, the layout before the vocoder split."""
 
-    stages: list[StageConfig] = Field(default_factory=lambda: _stages(colocated=False))
+    stages: list[StageConfig] = Field(default_factory=lambda: stages(colocated=False))
 
 
 EntryClass = MossTTSPipelineConfig

@@ -15,7 +15,7 @@ from sglang_omni.models.sensenova_u1.neo_unify.modeling_qwen3 import (
 )
 
 
-def _tiny_dense_config(num_hidden_layers=2):
+def tiny_dense_config(num_hidden_layers=2):
     config = NEOLLMConfig(
         vocab_size=32,
         hidden_size=8,
@@ -30,11 +30,13 @@ def _tiny_dense_config(num_hidden_layers=2):
         rms_norm_eps=1e-6,
     )
     config.layer_types = ["full_attention"] * num_hidden_layers
-    config._attn_implementation = "eager"
+    config._attn_implementation = (
+        "eager"  # noqa: leading-underscore -- existing native model or backend API
+    )
     return config
 
 
-def _axis_indexes(batch_size=1, sequence_length=5):
+def axis_indexes(batch_size=1, sequence_length=5):
     positions = torch.arange(sequence_length)
     indexes = torch.stack((positions, positions * 2, positions * 5))
     if batch_size == 1:
@@ -47,9 +49,9 @@ def _axis_indexes(batch_size=1, sequence_length=5):
 def test_rope_tables_are_built_once_per_dense_forward(
     monkeypatch, image_only, batch_size
 ):
-    model = Qwen3Model(_tiny_dense_config()).eval()
+    model = Qwen3Model(tiny_dense_config()).eval()
     inputs = torch.randn(batch_size, 5, 8)
-    indexes = _axis_indexes(batch_size)
+    indexes = axis_indexes(batch_size)
     indicators = None if image_only else torch.zeros(batch_size, 5, dtype=torch.bool)
     calls = 0
     original = Qwen3RotaryEmbedding.forward
@@ -73,10 +75,10 @@ def test_rope_tables_are_built_once_per_dense_forward(
 
 
 def test_shared_rope_tables_match_per_layer_for_batched_indexes():
-    first = Qwen3Attention(_tiny_dense_config(), 0)
-    second = Qwen3Attention(_tiny_dense_config(), 1)
+    first = Qwen3Attention(tiny_dense_config(), 0)
+    second = Qwen3Attention(tiny_dense_config(), 1)
     hidden_states = torch.randn(2, 5, 8)
-    indexes = _axis_indexes(batch_size=2)
+    indexes = axis_indexes(batch_size=2)
 
     shared = first.resolve_rope_tables(indexes, hidden_states)
     reference = second.resolve_rope_tables(indexes, hidden_states)
@@ -87,8 +89,8 @@ def test_shared_rope_tables_match_per_layer_for_batched_indexes():
 
 
 def test_shared_rope_tables_rebuild_after_dtype_change():
-    attention = Qwen3Attention(_tiny_dense_config(), 0)
-    indexes = _axis_indexes()
+    attention = Qwen3Attention(tiny_dense_config(), 0)
+    indexes = axis_indexes()
     fp32_tables = attention.resolve_rope_tables(
         indexes, torch.randn(1, 5, 8, dtype=torch.float32)
     )
@@ -105,9 +107,9 @@ def test_shared_rope_tables_rebuild_after_dtype_change():
 
 def test_rope_sharing_matches_per_layer_build_with_bf16_norm_dispatch(monkeypatch):
     torch.manual_seed(0)
-    model = Qwen3Model(_tiny_dense_config()).eval()
+    model = Qwen3Model(tiny_dense_config()).eval()
     inputs = torch.randn(1, 5, 8, dtype=torch.bfloat16)
-    indexes = _axis_indexes()
+    indexes = axis_indexes()
 
     def run():
         with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
@@ -132,9 +134,9 @@ def test_rope_sharing_matches_per_layer_build_with_bf16_norm_dispatch(monkeypatc
 
 def test_image_only_matches_all_true_indicators():
     torch.manual_seed(0)
-    model = Qwen3Model(_tiny_dense_config()).eval()
+    model = Qwen3Model(tiny_dense_config()).eval()
     inputs = torch.randn(1, 5, 8)
-    indexes = _axis_indexes()
+    indexes = axis_indexes()
     common = {
         "inputs_embeds": inputs,
         "indexes": indexes,
@@ -155,7 +157,7 @@ def test_image_only_matches_all_true_indicators():
 @pytest.mark.parametrize("interval", [(0.0, 1.0), (0.25, 0.75), (0.5, 0.5), (0.7, 0.8)])
 def test_t2i_cfg_schedule_preserves_scalar_decisions(needs_cfg, shift, interval):
     timesteps = torch.linspace(0, 1, 9)
-    timesteps = NEOChatModel._apply_time_schedule(
+    timesteps = NEOChatModel._apply_time_schedule(  # noqa: leading-underscore -- existing native model or backend API
         SimpleNamespace(), timesteps, 4, shift
     )
     probes = []
@@ -174,7 +176,9 @@ def test_t2i_cfg_schedule_preserves_scalar_decisions(needs_cfg, shift, interval)
         for t in timesteps[:-1]
     ]
 
-    assert NEOChatModel._build_cfg_schedule(timesteps, interval, needs_cfg) == expected
+    assert (
+        NEOChatModel._build_cfg_schedule(timesteps, interval, needs_cfg) == expected
+    )  # noqa: leading-underscore -- existing native model or backend API
 
 
 @pytest.mark.parametrize("interval", [(0.0, 1.0), (0.25, 0.75), (0.7, 0.8)])
@@ -185,4 +189,6 @@ def test_i2i_cfg_schedule_preserves_strict_interval_semantics(interval):
         for t in timesteps[:-1]
     ]
 
-    assert NEOChatModel._build_i2i_cfg_schedule(timesteps, interval) == expected
+    assert (
+        NEOChatModel._build_i2i_cfg_schedule(timesteps, interval) == expected
+    )  # noqa: leading-underscore -- existing native model or backend API

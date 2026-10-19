@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from prometheus_client import CollectorRegistry, Counter
 
-from sglang_omni.scheduling.messages import IncomingMessage
+from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.metrics_snapshot import backend_metrics_snapshot
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
 
@@ -39,7 +39,7 @@ def test_threaded_snapshot_counts_queue_and_aborted_running_work() -> None:
     try:
         future = Future()
         future.set_running_or_notify_cancel()
-        scheduler._pending["running"] = future
+        scheduler.pending["running"] = future
         scheduler.enqueue(IncomingMessage("queued", "new_request", None))
         assert scheduler.metrics_snapshot() == {
             "num_running_reqs": 1,
@@ -52,7 +52,7 @@ def test_threaded_snapshot_counts_queue_and_aborted_running_work() -> None:
             "num_queue_reqs": 0,
         }
     finally:
-        scheduler._executor.shutdown(wait=False, cancel_futures=True)
+        scheduler.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_threaded_compute_metrics_clean_state_after_failure() -> None:
@@ -64,11 +64,11 @@ def test_threaded_compute_metrics_clean_state_after_failure() -> None:
     try:
         scheduler.metrics_queued["r"] = 0
         with pytest.raises(ValueError):
-            scheduler._run_one_tracked("r", None)
+            scheduler.run_one_tracked("r", None)
         events = [scheduler.outbox.get_nowait().data for _ in range(3)]
         assert [event["event"] for event in events] == ["queue", "batch", "execution"]
         assert events[-1]["outcome"] == "error"
         assert not scheduler.metrics_queued
         assert not scheduler.metrics_active
     finally:
-        scheduler._executor.shutdown(wait=False, cancel_futures=True)
+        scheduler.executor.shutdown(wait=False, cancel_futures=True)

@@ -89,11 +89,19 @@ class Qwen3MLP(nn.Module):
             self.intermediate_size, self.hidden_size, bias=False
         )
         self.act_fn: nn.Module = ACT2FN[config.hidden_act]
-        self._npu_gate_up_weight: torch.Tensor | None = None
+        self._npu_gate_up_weight: torch.Tensor | None = (
+            None  # noqa: leading-underscore -- existing native model or backend API
+        )
 
-    def _pack_npu_gate_up_weights(self) -> torch.Tensor:
+    def _pack_npu_gate_up_weights(
+        self,
+    ) -> (
+        torch.Tensor
+    ):  # noqa: leading-underscore -- existing native model or backend API
         reference = self.gate_proj.weight
-        packed = self._npu_gate_up_weight
+        packed = (
+            self._npu_gate_up_weight
+        )  # noqa: leading-underscore -- existing native model or backend API
         if (
             packed is not None
             and packed.device == reference.device
@@ -111,10 +119,14 @@ class Qwen3MLP(nn.Module):
             ).contiguous()
             self.gate_proj.weight.set_(packed[: self.intermediate_size])
             self.up_proj.weight.set_(packed[self.intermediate_size :])
-        self._npu_gate_up_weight = packed
+        self._npu_gate_up_weight = (
+            packed  # noqa: leading-underscore -- existing native model or backend API
+        )
         return packed
 
-    def _use_npu_fused_mlp(self, x: torch.Tensor) -> bool:
+    def _use_npu_fused_mlp(
+        self, x: torch.Tensor
+    ) -> bool:  # noqa: leading-underscore -- existing native model or backend API
         if (
             x.device.type != "npu"
             or self.training
@@ -129,8 +141,12 @@ class Qwen3MLP(nn.Module):
         return npu_swiglu_available()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self._use_npu_fused_mlp(x):
-            gate_up = F.linear(x, self._pack_npu_gate_up_weights())
+        if self._use_npu_fused_mlp(
+            x
+        ):  # noqa: leading-underscore -- existing native model or backend API
+            gate_up = F.linear(
+                x, self._pack_npu_gate_up_weights()
+            )  # noqa: leading-underscore -- existing native model or backend API
             return self.down_proj(torch.ops.npu.npu_swiglu(gate_up))
         else:
             pass

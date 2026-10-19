@@ -138,7 +138,9 @@ class NEOVisionEmbeddings(nn.Module):
         self.register_buffer("cos_cached_y", None, persistent=False)
         self.register_buffer("sin_cached_y", None, persistent=False)
 
-    def _ensure_rope_cache(self, device: torch.device) -> None:
+    def _ensure_rope_cache(
+        self, device: torch.device
+    ) -> None:  # noqa: leading-underscore -- existing native model or backend API
         if self.cos_cached_x is not None and self.cos_cached_x.device == device:
             return
         else:
@@ -155,7 +157,7 @@ class NEOVisionEmbeddings(nn.Module):
         self.cos_cached_y: torch.Tensor = cos.clone()
         self.sin_cached_y: torch.Tensor = sin.clone()
 
-    def _apply_2d_rotary_pos_emb(
+    def _apply_2d_rotary_pos_emb(  # noqa: leading-underscore -- existing native model or backend API
         self, patch_embeds: torch.Tensor, grid_hw: torch.Tensor | None
     ) -> torch.Tensor:
         """Apply 2D Rotary Position Embedding to the patch embeddings."""
@@ -186,8 +188,12 @@ class NEOVisionEmbeddings(nn.Module):
         patch_embeds = self.gelu(self.patch_embedding(pixel_values)).view(
             -1, self.embed_dim
         )
-        self._ensure_rope_cache(patch_embeds.device)
-        patch_embeds = self._apply_2d_rotary_pos_emb(patch_embeds, grid_hw)
+        self._ensure_rope_cache(
+            patch_embeds.device
+        )  # noqa: leading-underscore -- existing native model or backend API
+        patch_embeds = self._apply_2d_rotary_pos_emb(
+            patch_embeds, grid_hw
+        )  # noqa: leading-underscore -- existing native model or backend API
         assert (grid_hw[:, 0] * grid_hw[:, 1]).sum() == patch_embeds.shape[0]
 
         patches_list = []

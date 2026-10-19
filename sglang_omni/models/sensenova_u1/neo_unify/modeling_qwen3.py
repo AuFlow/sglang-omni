@@ -82,11 +82,11 @@ from sglang_omni.models.sensenova_u1.neo_unify.qwen_feed_forward import (
     make_qwen3_rms_norm as make_qwen3_rms_norm,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.rotary_embeddings import (
-    _SENSENOVA_NPU_ROTARY_MUL_DISABLED as _SENSENOVA_NPU_ROTARY_MUL_DISABLED,
-)
-from sglang_omni.models.sensenova_u1.neo_unify.rotary_embeddings import (
     SENSENOVA_NPU_FUSED_ROPE_ENV,
     SENSENOVA_NPU_FUSED_ROPE_ROTARY_MUL,
+)
+from sglang_omni.models.sensenova_u1.neo_unify.rotary_embeddings import (
+    SENSENOVA_NPU_ROTARY_MUL_DISABLED as SENSENOVA_NPU_ROTARY_MUL_DISABLED,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.rotary_embeddings import (
     PositionEmbeddings as PositionEmbeddings,
@@ -124,7 +124,7 @@ from sglang_omni.models.sensenova_u1.neo_unify.transformers_compat import (
 # note (Codex): Preserve legacy module exports for existing callers.
 _HAS_FLASH_ATTN = HAS_FLASH_ATTN
 _flash_or_sdpa = flash_or_sdpa
-_sdpa_attn_func = sdpa_attn_func
+sdpa_attn_func = sdpa_attn_func
 _SENSENOVA_NPU_FUSED_ROPE_ENV = SENSENOVA_NPU_FUSED_ROPE_ENV
 _SENSENOVA_NPU_FUSED_ROPE_ROTARY_MUL = SENSENOVA_NPU_FUSED_ROPE_ROTARY_MUL
 _can_use_sensenova_npu_fused_rope = can_use_sensenova_npu_fused_rope

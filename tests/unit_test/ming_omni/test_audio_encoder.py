@@ -18,6 +18,7 @@ from sglang_omni.models.ming_omni.components import audio_encoder
         ("cpu", False),
         ("cuda", True),
         ("npu", True),
+        ("xpu", True),
     ],
 )
 def test_autocast_context_uses_tensor_device(
@@ -29,7 +30,7 @@ def test_autocast_context_uses_tensor_device(
     monkeypatch.setattr(torch, "autocast", autocast)
     tensor = SimpleNamespace(device=SimpleNamespace(type=device_type))
 
-    audio_encoder._autocast_context(tensor)
+    audio_encoder.autocast_context(tensor)
 
     autocast.assert_called_once_with(
         device_type=device_type,

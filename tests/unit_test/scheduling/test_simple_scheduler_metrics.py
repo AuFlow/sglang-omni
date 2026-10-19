@@ -5,7 +5,8 @@ import time
 
 import pytest
 
-from sglang_omni.scheduling.messages import IncomingMessage
+from sglang_omni.proto.request import OmniRequest, StagePayload
+from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 
@@ -68,7 +69,7 @@ def test_waiting_running_and_abort() -> None:
     assert scheduler.metrics_snapshot() == {"num_running_reqs": 0, "num_queue_reqs": 2}
     loop = asyncio.new_event_loop()
     try:
-        scheduler._run_single(scheduler._next_message(), loop)
+        scheduler.run_single(scheduler.next_message(), loop)
     finally:
         loop.close()
     scheduler.abort("b")
@@ -87,7 +88,72 @@ def test_batch_failure_clears_running() -> None:
     loop = asyncio.new_event_loop()
     try:
         with pytest.raises(ValueError):
-            scheduler._run_batch(batch, loop)
+            scheduler.run_batch(batch, loop)
     finally:
         loop.close()
     assert scheduler.metrics_snapshot() == {"num_running_reqs": 0, "num_queue_reqs": 0}
+
+
+def test_arrival_hook_and_metrics_both_receive_admitted_work() -> None:
+    arrivals: list[str] = []
+
+    def on_arrival(payload: StagePayload) -> None:
+        arrivals.append(payload.request_id)
+
+    scheduler = SimpleScheduler(
+        lambda payload: payload, request_arrival_hook=on_arrival
+    )
+    payload = StagePayload(
+        request_id="arrival",
+        request=OmniRequest(inputs="prompt", metadata={"omni_metrics_enabled": True}),
+        data="prompt",
+    )
+    scheduler.enqueue(IncomingMessage("arrival", "new_request", payload))
+    assert arrivals == ["arrival"]
+    assert scheduler.metrics_snapshot() == {"num_running_reqs": 0, "num_queue_reqs": 1}
+    loop = asyncio.new_event_loop()
+    try:
+        scheduler.run_single(scheduler.next_message(), loop)
+    finally:
+        loop.close()
+    assert scheduler.metrics_snapshot() == {"num_running_reqs": 0, "num_queue_reqs": 0}
+
+
+def test_partial_batch_failure_reports_each_request_outcome() -> None:
+    def compute_batch(payloads: list[StagePayload]) -> list[StagePayload | ValueError]:
+        return [payloads[0], ValueError("invalid image request")]
+
+    scheduler = SimpleScheduler(
+        lambda payload: payload, batch_compute_fn=compute_batch, max_batch_size=2
+    )
+    messages = [
+        IncomingMessage(
+            request_id,
+            "new_request",
+            StagePayload(
+                request_id=request_id,
+                request=OmniRequest(
+                    inputs="prompt", metadata={"omni_metrics_enabled": True}
+                ),
+                data="prompt",
+            ),
+        )
+        for request_id in ("good", "bad")
+    ]
+    for message in messages:
+        scheduler.enqueue(message)
+    loop = asyncio.new_event_loop()
+    try:
+        scheduler.run_batch(messages, loop)
+    finally:
+        loop.close()
+    outcomes: dict[str, str] = {}
+    results: dict[str, str] = {}
+    while not scheduler.outbox.empty():
+        message = scheduler.outbox.get_nowait()
+        if message.type == "metrics" and message.data["event"] == "execution":
+            outcomes[message.request_id] = message.data["outcome"]
+        elif message.type in ("result", "error"):
+            results[message.request_id] = message.type
+    assert results == {"good": "result", "bad": "error"}
+    assert outcomes == {"good": "completed", "bad": "error"}

@@ -30,7 +30,7 @@ def test_images_usage_and_complete_result_consumption(
         async def generate(
             self, request: GenerateRequest, request_id: str
         ) -> AsyncIterator[GenerateChunk]:
-            yield self._default_result_builder(
+            yield self.default_result_builder(
                 request_id,
                 {
                     "modality": "image",

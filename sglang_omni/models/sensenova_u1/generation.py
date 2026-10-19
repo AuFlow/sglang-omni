@@ -38,10 +38,10 @@ def generate_image(
     inputs = payload.request.inputs
     try:
         if isinstance(inputs, dict) and inputs.get("task") == "image_edit":
-            return _generate_image_edit(payload, model, tokenizer)
+            return generate_image_edit(payload, model, tokenizer)
         else:
             pass
-        result = _generate_text_to_image(payload, model, tokenizer)
+        result = generate_text_to_image(payload, model, tokenizer)
         result.data["image_usage"] = build_image_usage(
             payload.request.inputs, tokenizer
         )
@@ -70,7 +70,7 @@ def generate_images(
         inputs = payload.request.inputs
         if isinstance(inputs, dict) and inputs.get("task") == "image_edit":
             try:
-                results[index] = _generate_image_edit(payload, model, tokenizer)
+                results[index] = generate_image_edit(payload, model, tokenizer)
             except Exception:
                 unmount_cache_dit_after_failure(model)
                 raise
@@ -79,7 +79,7 @@ def generate_images(
             pass
         options = text_to_image_options(payload)
         if options.n > 1:
-            results[index] = _generate_text_to_image(payload, model, tokenizer)
+            results[index] = generate_text_to_image(payload, model, tokenizer)
             continue
         else:
             pass
@@ -98,10 +98,10 @@ def generate_images(
         try:
             if len(compatible_payloads) == 1:
                 batch_results = [
-                    _generate_text_to_image(compatible_payloads[0], model, tokenizer)
+                    generate_text_to_image(compatible_payloads[0], model, tokenizer)
                 ]
             else:
-                batch_results = _generate_text_to_image_batch(
+                batch_results = generate_text_to_image_batch(
                     list(compatible_payloads), model, tokenizer
                 )
         except Exception:
@@ -135,7 +135,7 @@ def text_to_image_options(payload: StagePayload) -> SenseNovaU1Sampling:
     return SenseNovaU1Sampling.from_params(payload.request.params)
 
 
-def _generate_text_to_image(
+def generate_text_to_image(
     payload: StagePayload, model: NEOChatModel, tokenizer: PreTrainedTokenizerBase
 ) -> StagePayload:
     prompt = payload.request.inputs
@@ -193,7 +193,7 @@ def _generate_text_to_image(
     return payload
 
 
-def _generate_text_to_image_batch(
+def generate_text_to_image_batch(
     payloads: list[StagePayload],
     model: NEOChatModel,
     tokenizer: PreTrainedTokenizerBase,
@@ -270,7 +270,7 @@ def _generate_text_to_image_batch(
     ]
 
 
-def _generate_image_edit(
+def generate_image_edit(
     payload: StagePayload, model: NEOChatModel, tokenizer: PreTrainedTokenizerBase
 ) -> StagePayload:
     inputs = payload.request.inputs

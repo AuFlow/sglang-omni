@@ -20,7 +20,7 @@ from sglang_omni.models.sensenova_u1.tensor_parallel import (
 )
 
 
-def _model():
+def make_model():
     config = SimpleNamespace(
         model_type="qwen3",
         hidden_size=16,
@@ -53,7 +53,7 @@ def _model():
     return model.eval()
 
 
-def _forward(model, inputs, suffix, caches=None, update_cache=True):
+def forward(model, inputs, suffix, caches=None, update_cache=True):
     """Exercise GQA, prefix KV and repeated image denoising with local heads."""
     next_caches = []
     for index, layer in enumerate(model.language_model.model.layers):
@@ -86,7 +86,7 @@ def _forward(model, inputs, suffix, caches=None, update_cache=True):
     return model.pixel_head(inputs), next_caches
 
 
-def _distributed_parity(rank, size, rendezvous):
+def distributed_parity(rank, size, rendezvous):
     torch.set_num_threads(1)
     dist.init_process_group(
         "gloo",
@@ -97,7 +97,7 @@ def _distributed_parity(rank, size, rendezvous):
     )
     try:
         torch.manual_seed(17)
-        reference = _model()
+        reference = make_model()
         sharded = copy.deepcopy(reference)
         apply_tensor_parallel(sharded, rank, size, dist.group.WORLD)
         assert (
@@ -109,16 +109,16 @@ def _distributed_parity(rank, size, rendezvous):
         with torch.inference_mode():
             for batch in (1, 2):
                 prefix = torch.randn(batch, 5, 16)
-                expected, full_cache = _forward(reference, prefix, "")
-                actual, local_cache = _forward(sharded, prefix, "")
+                expected, full_cache = forward(reference, prefix, "")
+                actual, local_cache = forward(sharded, prefix, "")
                 torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-5)
                 assert local_cache[0][0].shape[1] == 8 // size
                 for _ in range(3):
                     image = torch.randn(batch, 3, 16)
-                    expected, _ = _forward(
+                    expected, _ = forward(
                         reference, image, "_mot_gen", full_cache, False
                     )
-                    actual, _ = _forward(sharded, image, "_mot_gen", local_cache, False)
+                    actual, _ = forward(sharded, image, "_mot_gen", local_cache, False)
                     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-5)
             noise = torch.full((2, 3, 4, 4), float(rank))
             synchronize_tp_noise(sharded, noise)
@@ -131,7 +131,7 @@ def _distributed_parity(rank, size, rendezvous):
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="requires Gloo")
 def test_distributed_attention_mlp_and_prefix_cache_parity(tmp_path, size):
     mp.spawn(
-        _distributed_parity,
+        distributed_parity,
         args=(size, (tmp_path / "rendezvous").as_uri()),
         nprocs=size,
         join=True,
@@ -147,7 +147,7 @@ def test_distributed_attention_mlp_and_prefix_cache_parity(tmp_path, size):
     ],
 )
 def test_invalid_backbone_is_rejected_before_mutation(field, value):
-    model = _model()
+    model = make_model()
     original = model.language_model.model.layers[0].self_attn.q_proj
     setattr(model.language_model.model.config, field, value)
     with pytest.raises(ValueError):
@@ -156,7 +156,7 @@ def test_invalid_backbone_is_rejected_before_mutation(field, value):
 
 
 def test_tp_one_is_a_noop_and_double_sharding_is_rejected():
-    model = _model()
+    model = make_model()
     original = model.language_model.model.layers[0].self_attn.q_proj
     apply_tensor_parallel(model, 0, 1, None)
     assert model.language_model.model.layers[0].self_attn.q_proj is original

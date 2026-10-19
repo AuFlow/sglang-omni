@@ -17,18 +17,32 @@ import logging
 import queue as _queue_mod
 import threading
 import time
-from collections.abc import Awaitable, Callable
-from typing import Any
+from collections.abc import Coroutine, Sequence
+from typing import Awaitable, Callable, Generic, Protocol
 
-from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
+from sglang_omni.proto.request import StagePayload
+from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
+from sglang_omni.scheduling.threaded_simple_scheduler import ComputeInput, ComputeResult
 
 logger = logging.getLogger(__name__)
 
 
-class SimpleScheduler:
+class BatchKey(Protocol):
+    def __call__(
+        self, payload: StagePayload
+    ) -> tuple[str | int | float | bool | None, ...]: ...
+
+
+class RequestArrivalHook(Protocol):
+    def __call__(self, payload: StagePayload) -> None: ...
+
+
+class SimpleScheduler(Generic[ComputeInput, ComputeResult]):
     """Process requests one at a time via a callable.
 
     Supports sync and async callables for ``new_request`` messages only.
+    A batch_compute_fn may return a BaseException in an item's
+    result slot to fail only that request while preserving the rest of the batch.
     A ``batch_key_fn`` can keep incompatible requests in separate batches.
     Streaming stages should provide a dedicated scheduler implementation
     (for example ``Code2WavScheduler``) rather than rely on SimpleScheduler.
@@ -36,31 +50,41 @@ class SimpleScheduler:
 
     def __init__(
         self,
-        compute_fn: Callable,
+        compute_fn: Callable[
+            [ComputeInput], ComputeResult | Coroutine[None, None, ComputeResult]
+        ],
         *,
-        batch_compute_fn: Callable | None = None,
+        batch_compute_fn: (
+            Callable[
+                [list[ComputeInput]],
+                Sequence[ComputeResult]
+                | Coroutine[None, None, Sequence[ComputeResult]],
+            ]
+            | None
+        ) = None,
         max_batch_size: int = 1,
         max_batch_wait_ms: int = 0,
         batch_wait_when_idle: bool = True,
-        batch_key_fn: Callable[[Any], Any] | None = None,
-        request_cost_fn: Callable[[Any], int] | None = None,
+        batch_key_fn: BatchKey | None = None,
+        request_cost_fn: Callable[[StagePayload], int] | None = None,
         max_batch_cost: int | None = None,
         max_concurrency: int = 1,
         abort_callback: Callable[[str], None] | None = None,
         shutdown_callback: Callable[[], None] | None = None,
         shutdown_on_compute_thread: bool = False,
+        request_arrival_hook: RequestArrivalHook | None = None,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
         self.outbox: _queue_mod.Queue[OutgoingMessage] = _queue_mod.Queue()
         self.requires_tp_work_fanout: bool = True
-        self._fn = compute_fn
-        self._batch_fn = batch_compute_fn
-        self._max_batch_size = max(int(max_batch_size), 1)
-        self._max_batch_wait_s = max(float(max_batch_wait_ms), 0.0) / 1000.0
-        self._batch_wait_when_idle = bool(batch_wait_when_idle)
-        self._batch_key_fn = batch_key_fn
-        self._request_cost_fn = request_cost_fn
-        self._max_batch_cost = (
+        self.fn = compute_fn
+        self.batch_fn = batch_compute_fn
+        self.max_batch_size = max(int(max_batch_size), 1)
+        self.max_batch_wait_s = max(float(max_batch_wait_ms), 0.0) / 1000.0
+        self.batch_wait_when_idle = bool(batch_wait_when_idle)
+        self.batch_key_fn = batch_key_fn
+        self.request_cost_fn = request_cost_fn
+        self.max_batch_cost = (
             max(int(max_batch_cost), 0) if max_batch_cost is not None else None
         )
         # Note (Chenchen, Chenyang):
@@ -68,53 +92,43 @@ class SimpleScheduler:
         # via asyncio.to_thread so synchronous chunks do not pin the event loop.
         # Requires compute_fn to be re-entrant. Mutually exclusive with the
         # batch_compute_fn path (set one or the other, not both).
-        self._max_concurrency = max(int(max_concurrency), 1)
-        if self._max_concurrency > 1 and batch_compute_fn is not None:
+        self.max_concurrency = max(int(max_concurrency), 1)
+        if self.max_concurrency > 1 and batch_compute_fn is not None:
             raise ValueError(
                 "max_concurrency > 1 and batch_compute_fn are mutually exclusive"
             )
-        self._abort_callback = abort_callback
-        self._shutdown_callback = shutdown_callback
-        self._shutdown_lock = threading.Lock()
+        else:
+            pass
+        self.abort_callback = abort_callback
+        self.shutdown_callback = shutdown_callback
+        self.request_arrival_hook = request_arrival_hook
+        self.shutdown_lock = threading.Lock()
         self.wait_for_shutdown: bool = shutdown_on_compute_thread
         self.shutdown_on_compute_thread: bool = shutdown_on_compute_thread
         self.started: bool = False
         self.stop_requested: bool = False
-        self._aborted: set[str] = set()
-        self._abort_lock = threading.Lock()
-        self._running = False
-        self._pending_messages: collections.deque[IncomingMessage] = collections.deque()
-        self._metrics_lock = threading.Lock()
-        self._waiting_requests: set[str] = set()
-        self._running_requests: set[str] = set()
+        self.aborted: set[str] = set()
+        self.abort_lock = threading.Lock()
+        self.running = False
+        self.pending_messages: collections.deque[IncomingMessage] = collections.deque()
+        self.metrics_lock = threading.Lock()
+        self.waiting_requests: set[str] = set()
+        self.running_requests: set[str] = set()
         self.metrics_queued: dict[str, float] = {}
         self.metrics_started: dict[str, float] = {}
         self.metrics_outcomes: dict[str, str] = {}
 
-    def enqueue(self, message: IncomingMessage) -> None:
-        if message.type == "new_request":
-            with self._metrics_lock:
-                self._waiting_requests.add(message.request_id)
-                request = getattr(message.data, "request", None)
-                if request is not None and request.metadata.get("omni_metrics_enabled"):
-                    self.metrics_queued[message.request_id] = time.perf_counter()
-                else:
-                    pass
-        else:
-            pass
-        self.inbox.put(message)
-
     def metrics_snapshot(self) -> dict[str, int]:
-        with self._metrics_lock:
+        with self.metrics_lock:
             return {
-                "num_running_reqs": len(self._running_requests),
-                "num_queue_reqs": len(self._waiting_requests),
+                "num_running_reqs": len(self.running_requests),
+                "num_queue_reqs": len(self.waiting_requests),
             }
 
-    def _metrics_begin(self, request_ids: list[str]) -> None:
-        with self._metrics_lock:
-            self._waiting_requests.difference_update(request_ids)
-            self._running_requests.update(request_ids)
+    def metrics_begin(self, request_ids: list[str]) -> None:
+        with self.metrics_lock:
+            self.waiting_requests.difference_update(request_ids)
+            self.running_requests.update(request_ids)
             now = time.perf_counter() if self.metrics_queued else None
             tracked = []
             for request_id in request_ids:
@@ -129,6 +143,8 @@ class SimpleScheduler:
                             data={"event": "queue", "duration": now - queued},
                         )
                     )
+                else:
+                    pass
             if tracked:
                 self.outbox.put(
                     OutgoingMessage(
@@ -137,11 +153,13 @@ class SimpleScheduler:
                         data={"event": "batch", "size": len(request_ids)},
                     )
                 )
+            else:
+                pass
 
-    def _metrics_end(self, request_ids: list[str], outcome: str = "completed") -> None:
-        with self._metrics_lock:
-            self._waiting_requests.difference_update(request_ids)
-            self._running_requests.difference_update(request_ids)
+    def metrics_end(self, request_ids: list[str], outcome: str = "completed") -> None:
+        with self.metrics_lock:
+            self.waiting_requests.difference_update(request_ids)
+            self.running_requests.difference_update(request_ids)
             now = time.perf_counter() if self.metrics_started else None
             for request_id in request_ids:
                 started = self.metrics_started.pop(request_id, None)
@@ -159,95 +177,141 @@ class SimpleScheduler:
                             },
                         )
                     )
+                else:
+                    pass
 
-    def _cleanup_aborted_request(self, request_id: str) -> None:
-        if self._abort_callback is None:
+    def cleanup_aborted_request(self, request_id: str) -> None:
+        if self.abort_callback is None:
             return
+        else:
+            pass
         try:
-            self._abort_callback(request_id)
+            self.abort_callback(request_id)
         except Exception:
             logger.exception("SimpleScheduler: abort cleanup failed for %s", request_id)
 
-    def _consume_if_aborted(self, request_id: str) -> bool:
-        with self._abort_lock:
-            if request_id not in self._aborted:
+    def is_aborted(self, request_id: str) -> bool:
+        with self.abort_lock:
+            return request_id in self.aborted
+
+    def consume_if_aborted(self, request_id: str) -> bool:
+        with self.abort_lock:
+            if request_id not in self.aborted:
                 return False
-            self._aborted.discard(request_id)
-        self._cleanup_aborted_request(request_id)
-        with self._metrics_lock:
+            else:
+                pass
+            self.aborted.discard(request_id)
+        self.cleanup_aborted_request(request_id)
+        with self.metrics_lock:
             if request_id in self.metrics_started:
                 self.metrics_outcomes[request_id] = "aborted"
+            else:
+                pass
         return True
 
-    def _message_cost(self, msg: IncomingMessage) -> int:
-        if self._request_cost_fn is None or msg.type != "new_request":
+    def enqueue(self, message: IncomingMessage) -> None:
+        if message.type == "new_request":
+            with self.metrics_lock:
+                self.waiting_requests.add(message.request_id)
+                request = getattr(message.data, "request", None)
+                if request is not None and request.metadata.get("omni_metrics_enabled"):
+                    self.metrics_queued[message.request_id] = time.perf_counter()
+                else:
+                    pass
+        else:
+            pass
+        if message.type == "new_request" and self.request_arrival_hook is not None:
+            self.request_arrival_hook(message.data)
+        else:
+            pass
+        self.inbox.put(message)
+
+    def message_cost(self, msg: IncomingMessage) -> int:
+        if self.request_cost_fn is None or msg.type != "new_request":
             return 0
-        return max(int(self._request_cost_fn(msg.data)), 0)
+        else:
+            pass
+        return max(int(self.request_cost_fn(msg.data)), 0)
 
-    def _next_message(self) -> IncomingMessage | None:
-        if self._pending_messages:
-            return self._pending_messages.popleft()
-        try:
-            return self.inbox.get(timeout=0.1)
-        except _queue_mod.Empty:
-            return None
+    def next_message(self) -> IncomingMessage:
+        if self.pending_messages:
+            return self.pending_messages.popleft()
+        else:
+            pass
+        return self.inbox.get()
 
-    def _collect_batch(self, first_msg: IncomingMessage) -> list[IncomingMessage]:
+    def collect_batch(self, first_msg: IncomingMessage) -> list[IncomingMessage]:
         batch = [first_msg]
-        if self._batch_fn is None or self._max_batch_size <= 1:
+        if self.batch_fn is None or self.max_batch_size <= 1:
             return batch
+        else:
+            pass
 
         batch_key = (
-            self._batch_key_fn(first_msg.data)
-            if self._batch_key_fn is not None
-            else None
+            self.batch_key_fn(first_msg.data) if self.batch_key_fn is not None else None
         )
-        batch_cost = self._message_cost(first_msg)
+        batch_cost = self.message_cost(first_msg)
         deadline: float | None = (
-            time.monotonic() + self._max_batch_wait_s
-            if self._batch_wait_when_idle
+            time.monotonic() + self.max_batch_wait_s
+            if self.batch_wait_when_idle
             else None
         )
-        while len(batch) < self._max_batch_size:
+        while len(batch) < self.max_batch_size:
             try:
                 msg = self.inbox.get_nowait()
             except _queue_mod.Empty:
                 if deadline is None:
                     break
+                else:
+                    pass
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
+                else:
+                    pass
                 try:
                     msg = self.inbox.get(timeout=remaining)
                 except _queue_mod.Empty:
                     break
 
             if msg.type == "new_request":
-                if self._batch_key_fn is not None:
+                if self.batch_key_fn is not None:
                     try:
-                        msg_key = self._batch_key_fn(msg.data)
+                        msg_key = self.batch_key_fn(msg.data)
                     except (TypeError, ValueError):
-                        self._pending_messages.appendleft(msg)
+                        self.pending_messages.appendleft(msg)
                         break
                     if msg_key != batch_key:
-                        self._pending_messages.appendleft(msg)
+                        self.pending_messages.appendleft(msg)
                         break
-                if self._max_batch_cost is not None:
-                    msg_cost = self._message_cost(msg)
-                    if batch and batch_cost + msg_cost > self._max_batch_cost:
-                        self._pending_messages.appendleft(msg)
+                    else:
+                        pass
+                else:
+                    pass
+                if self.max_batch_cost is not None:
+                    msg_cost = self.message_cost(msg)
+                    if batch and batch_cost + msg_cost > self.max_batch_cost:
+                        self.pending_messages.appendleft(msg)
                         break
+                    else:
+                        pass
                     batch_cost += msg_cost
+                else:
+                    pass
                 batch.append(msg)
                 if deadline is None:
-                    deadline = time.monotonic() + self._max_batch_wait_s
+                    deadline = time.monotonic() + self.max_batch_wait_s
+                else:
+                    pass
             else:
-                self._pending_messages.append(msg)
+                self.pending_messages.append(msg)
         return batch
 
     @staticmethod
-    def _emit_result(
-        request_id: str, result: Any, outbox: _queue_mod.Queue[OutgoingMessage]
+    def emit_result(
+        request_id: str,
+        result: object,
+        outbox: _queue_mod.Queue[OutgoingMessage],
     ) -> None:
         outbox.put(
             OutgoingMessage(
@@ -258,7 +322,7 @@ class SimpleScheduler:
         )
 
     @staticmethod
-    def _emit_error(
+    def emit_error(
         request_id: str, error: BaseException, outbox: _queue_mod.Queue[OutgoingMessage]
     ) -> None:
         outbox.put(
@@ -269,150 +333,182 @@ class SimpleScheduler:
             )
         )
 
-    def _run_single(
-        self, msg: IncomingMessage, loop: asyncio.AbstractEventLoop
-    ) -> None:
-        self._metrics_begin([msg.request_id])
+    def run_single(self, msg: IncomingMessage, loop: asyncio.AbstractEventLoop) -> None:
+        self.metrics_begin([msg.request_id])
         outcome = "completed"
         try:
-            self._run_single_untracked(msg, loop)
+            self.run_single_untracked(msg, loop)
         except BaseException:
             outcome = "error"
             raise
         finally:
-            self._metrics_end([msg.request_id], outcome)
+            self.metrics_end([msg.request_id], outcome)
 
-    def _run_single_untracked(
+    def run_single_untracked(
         self, msg: IncomingMessage, loop: asyncio.AbstractEventLoop
     ) -> None:
-        if self._consume_if_aborted(msg.request_id):
+        if self.consume_if_aborted(msg.request_id):
             return
+        else:
+            pass
         try:
-            result = self._fn(msg.data)
+            result = self.fn(msg.data)
             if asyncio.iscoroutine(result):
                 result = loop.run_until_complete(result)
+            else:
+                pass
         except Exception:
-            if self._consume_if_aborted(msg.request_id):
+            if self.consume_if_aborted(msg.request_id):
                 return
+            else:
+                pass
             raise
-        if self._consume_if_aborted(msg.request_id):
+        if self.consume_if_aborted(msg.request_id):
             return
-        self._emit_result(msg.request_id, result, self.outbox)
+        else:
+            pass
+        self.emit_result(msg.request_id, result, self.outbox)
 
-    def _run_batch(
+    def run_batch(
         self,
         batch: list[IncomingMessage],
         loop: asyncio.AbstractEventLoop,
     ) -> None:
-        if self._batch_fn is None or len(batch) <= 1:
+        if self.batch_fn is None or len(batch) <= 1:
             for msg in batch:
-                self._run_single(msg, loop)
+                self.run_single(msg, loop)
             return
+        else:
+            pass
         request_ids = [msg.request_id for msg in batch]
-        self._metrics_begin(request_ids)
+        self.metrics_begin(request_ids)
         outcome = "completed"
         try:
-            self._run_batch_untracked(batch, loop)
+            self.run_batch_untracked(batch, loop)
         except BaseException:
             outcome = "error"
             raise
         finally:
-            self._metrics_end(request_ids, outcome)
+            self.metrics_end(request_ids, outcome)
 
-    def _run_batch_untracked(
+    def run_batch_untracked(
         self, batch: list[IncomingMessage], loop: asyncio.AbstractEventLoop
     ) -> None:
-        if self._batch_fn is None or len(batch) <= 1:
+        if self.batch_fn is None or len(batch) <= 1:
             for msg in batch:
-                self._run_single(msg, loop)
+                self.run_single(msg, loop)
             return
+        else:
+            pass
 
         payloads = [msg.data for msg in batch]
-        results = self._batch_fn(payloads)
+        results = self.batch_fn(payloads)
         if asyncio.iscoroutine(results):
             results = loop.run_until_complete(results)
+        else:
+            pass
         if len(results) != len(batch):
             raise ValueError(
                 f"batch_compute_fn returned {len(results)} results for {len(batch)} requests"
             )
+        else:
+            pass
         for msg, result in zip(batch, results):
-            if self._consume_if_aborted(msg.request_id):
+            if self.consume_if_aborted(msg.request_id):
                 continue
-            self._emit_result(msg.request_id, result, self.outbox)
+            else:
+                pass
+            if isinstance(result, BaseException):
+                with self.metrics_lock:
+                    if msg.request_id in self.metrics_started:
+                        self.metrics_outcomes[msg.request_id] = "error"
+                    else:
+                        pass
+                self.emit_error(msg.request_id, result, self.outbox)
+            else:
+                self.emit_result(msg.request_id, result, self.outbox)
 
     @staticmethod
-    async def _await_result(result: Awaitable[Any]) -> Any:
+    async def await_result(result: Awaitable[ComputeResult]) -> ComputeResult:
         return await result
 
-    def _run_compute_in_thread(self, payload: Any) -> Any:
-        result = self._fn(payload)
+    def run_compute_in_thread(self, payload: ComputeInput) -> ComputeResult:
+        result = self.fn(payload)
         if inspect.isawaitable(result):
-            result = asyncio.run(self._await_result(result))
+            result = asyncio.run(self.await_result(result))
+        else:
+            pass
         return result
+
+    def warm_up_serving_thread(self) -> None:
+        pass
 
     def start(self) -> None:
         """Run the processing loop (blocks the thread)."""
-        with self._shutdown_lock:
+        with self.shutdown_lock:
             if self.shutdown_on_compute_thread and self.stop_requested:
                 return
             else:
                 pass
             self.started = True
-            self._running = True
+            self.running = True
         try:
-            if self._max_concurrency > 1:
-                self._start_concurrent()
+            if self.max_concurrency > 1:
+                self.start_concurrent()
             else:
-                self._start_serial()
+                self.start_serial()
         finally:
             if self.shutdown_on_compute_thread:
-                self._running = False
-                self._run_shutdown_callback()
+                self.running = False
+                self.run_shutdown_callback()
             else:
                 pass
 
-    def _start_serial(self) -> None:
+    def start_serial(self) -> None:
         loop = asyncio.new_event_loop()
         try:
-            while self._running:
-                msg = self._next_message()
-                if msg is None:
-                    continue
-
+            while self.running:
+                msg = self.next_message()
                 if msg.type == "new_request":
-                    if self._consume_if_aborted(msg.request_id):
+                    if self.consume_if_aborted(msg.request_id):
                         continue
+                    else:
+                        pass
                     batch = [msg]
                     try:
-                        batch = self._collect_batch(msg)
-                        self._run_batch(batch, loop)
+                        batch = self.collect_batch(msg)
+                        self.run_batch(batch, loop)
                     except Exception as exc:
                         logger.exception(
                             "SimpleScheduler: compute_fn failed for %s", msg.request_id
                         )
                         for failed_msg in batch:
-                            if self._consume_if_aborted(failed_msg.request_id):
+                            if self.consume_if_aborted(failed_msg.request_id):
                                 continue
-                            self._emit_error(
+                            else:
+                                pass
+                            self.emit_error(
                                 failed_msg.request_id,
                                 exc,
                                 self.outbox,
                             )
+                else:
+                    pass
         finally:
             loop.close()
 
-    def _start_concurrent(self) -> None:
+    def start_concurrent(self) -> None:
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(self._run_workers(loop))
+            loop.run_until_complete(self.run_workers(loop))
         finally:
             loop.close()
 
-    async def _run_workers(self, loop: asyncio.AbstractEventLoop) -> None:
+    async def run_workers(self, loop: asyncio.AbstractEventLoop) -> None:
         async_inbox: asyncio.Queue[IncomingMessage] = asyncio.Queue()
 
         async def bridge_inbox() -> None:
-            while self._running:
+            while self.running:
                 try:
                     msg = await loop.run_in_executor(
                         None, lambda: self.inbox.get(timeout=0.05)
@@ -422,73 +518,86 @@ class SimpleScheduler:
                 await async_inbox.put(msg)
 
         async def worker() -> None:
-            while self._running:
+            while self.running:
                 try:
                     msg = await asyncio.wait_for(async_inbox.get(), timeout=0.1)
                 except asyncio.TimeoutError:
                     continue
                 if msg.type != "new_request":
                     continue
-                if self._consume_if_aborted(msg.request_id):
+                else:
+                    pass
+                if self.consume_if_aborted(msg.request_id):
                     continue
-                self._metrics_begin([msg.request_id])
+                else:
+                    pass
+                self.metrics_begin([msg.request_id])
                 outcome = "completed"
                 try:
                     result = await asyncio.to_thread(
-                        self._run_compute_in_thread, msg.data
+                        self.run_compute_in_thread, msg.data
                     )
-                    if self._consume_if_aborted(msg.request_id):
+                    if self.consume_if_aborted(msg.request_id):
                         continue
-                    self._emit_result(msg.request_id, result, self.outbox)
+                    else:
+                        pass
+                    self.emit_result(msg.request_id, result, self.outbox)
                 except Exception as exc:
                     outcome = "error"
-                    if self._consume_if_aborted(msg.request_id):
+                    if self.consume_if_aborted(msg.request_id):
                         continue
+                    else:
+                        pass
                     logger.exception(
                         "SimpleScheduler: compute_fn failed for %s", msg.request_id
                     )
-                    self._emit_error(msg.request_id, exc, self.outbox)
+                    self.emit_error(msg.request_id, exc, self.outbox)
                 finally:
-                    self._metrics_end([msg.request_id], outcome)
+                    self.metrics_end([msg.request_id], outcome)
 
         bridge_task = asyncio.create_task(bridge_inbox())
         worker_tasks = [
-            asyncio.create_task(worker()) for _ in range(self._max_concurrency)
+            asyncio.create_task(worker()) for _ in range(self.max_concurrency)
         ]
         try:
             await asyncio.gather(bridge_task, *worker_tasks)
         except asyncio.CancelledError:
             # Expected during shutdown/task cancellation; suppress intentionally.
-            logger.debug("SimpleScheduler: _run_workers cancelled during shutdown")
+            logger.debug("SimpleScheduler: run_workers cancelled during shutdown")
 
     def stop(self) -> None:
-        with self._metrics_lock:
-            self._waiting_requests.clear()
+        with self.metrics_lock:
+            self.waiting_requests.clear()
             self.metrics_queued.clear()
-        with self._shutdown_lock:
-            self._running = False
+        with self.shutdown_lock:
+            self.running = False
+            self.inbox.put(IncomingMessage(request_id="", type="wakeup"))
             self.stop_requested = True
             if self.shutdown_on_compute_thread and self.started:
                 return
             else:
                 pass
-        self._run_shutdown_callback()
+        self.run_shutdown_callback()
 
-    def _run_shutdown_callback(self) -> None:
-        with self._shutdown_lock:
-            callback = self._shutdown_callback
-            self._shutdown_callback = None
+    def run_shutdown_callback(self) -> None:
+        with self.shutdown_lock:
+            callback = self.shutdown_callback
+            self.shutdown_callback = None
         if callback is not None:
             callback()
+        else:
+            pass
 
     def abort(self, request_id: str) -> None:
-        with self._metrics_lock:
-            self._waiting_requests.discard(request_id)
+        with self.metrics_lock:
+            self.waiting_requests.discard(request_id)
             self.metrics_queued.pop(request_id, None)
-        with self._abort_lock:
-            self._aborted.add(request_id)
-            if len(self._aborted) > 10000:
-                excess = len(self._aborted) - 5000
-                for stale_request_id in list(self._aborted)[:excess]:
-                    self._aborted.discard(stale_request_id)
-        self._cleanup_aborted_request(request_id)
+        with self.abort_lock:
+            self.aborted.add(request_id)
+            if len(self.aborted) > 10000:
+                excess = len(self.aborted) - 5000
+                for stale_request_id in list(self.aborted)[:excess]:
+                    self.aborted.discard(stale_request_id)
+            else:
+                pass
+        self.cleanup_aborted_request(request_id)

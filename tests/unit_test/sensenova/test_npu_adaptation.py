@@ -15,19 +15,19 @@ from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import (
     NEOChatModel,
     _copy_right_aligned_prefix_bnsd,
     _prepare_i2i_flash_kv_cache,
-    _randn_with_seed,
     prepare_flash_kv_cache,
+    randn_with_seed,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_qwen3 import (
     Qwen3Attention,
     Qwen3MLP,
     _flash_or_sdpa,
-    _sdpa_attn_func,
     create_block_causal_mask,
     make_qwen3_rms_norm,
     npu_fia_available,
     npu_swiglu_available,
     position_ids_from_indexes,
+    sdpa_attn_func,
 )
 from sglang_omni.platforms import current_platform as model_platform
 
@@ -69,7 +69,7 @@ def test_prepares_each_i2i_prefix_length_for_attention(prefix_length):
     assert layer.flash_v_cache.shape == (batch_size, prefix_length + 3, 2, 4)
 
 
-def _force_generator_fallback(monkeypatch, device_type):
+def force_generator_fallback(monkeypatch, device_type):
     original_generator = torch.Generator
 
     def unsupported_device_generator(device="cpu"):
@@ -81,23 +81,23 @@ def _force_generator_fallback(monkeypatch, device_type):
 
 
 def test_randn_fallback_preserves_cpu_rng(monkeypatch):
-    _force_generator_fallback(monkeypatch, "cpu")
+    force_generator_fallback(monkeypatch, "cpu")
     rng_state = torch.get_rng_state().clone()
 
-    first = _randn_with_seed((2, 3), device="cpu", dtype=torch.float32, seed=17)
-    second = _randn_with_seed((2, 3), device="cpu", dtype=torch.float32, seed=17)
+    first = randn_with_seed((2, 3), device="cpu", dtype=torch.float32, seed=17)
+    second = randn_with_seed((2, 3), device="cpu", dtype=torch.float32, seed=17)
 
     assert torch.equal(first, second)
     assert torch.equal(torch.get_rng_state(), rng_state)
 
 
 def test_randn_supports_per_sample_seeds():
-    actual = _randn_with_seed(
+    actual = randn_with_seed(
         (2, 3, 4), device=torch.device("cpu"), dtype=torch.float32, seed=[7, 19]
     )
     expected = torch.cat(
         [
-            _randn_with_seed(
+            randn_with_seed(
                 (1, 3, 4),
                 device=torch.device("cpu"),
                 dtype=torch.float32,
@@ -110,7 +110,7 @@ def test_randn_supports_per_sample_seeds():
     assert torch.equal(actual, expected)
 
 
-class _FakeTokenizer:
+class FakeTokenizer:
     pad_token_id = None
     eos_token_id = 2
 
@@ -124,8 +124,8 @@ def test_builds_padded_batched_text_inputs():
     model = SimpleNamespace(device=torch.device("cpu"))
 
     input_ids, indexes, attention_mask, valid_mask, prefix_lengths = (
-        NEOChatModel._build_t2i_text_inputs(
-            model, _FakeTokenizer(), ["short", "a much longer prompt"]
+        NEOChatModel._build_t2i_text_inputs(  # noqa: leading-underscore -- existing native model or backend API
+            model, FakeTokenizer(), ["short", "a much longer prompt"]
         )
     )
 
@@ -158,12 +158,14 @@ def test_position_indexes_support_batched_inputs():
 
 def test_singleton_text_matches_valid_batched_tokens():
     model = SimpleNamespace(device=torch.device("cpu"))
-    tokenizer = _FakeTokenizer()
-    batched = NEOChatModel._build_t2i_text_inputs(
+    tokenizer = FakeTokenizer()
+    batched = NEOChatModel._build_t2i_text_inputs(  # noqa: leading-underscore -- existing native model or backend API
         model, tokenizer, ["short", "a much longer prompt"]
     )
     for index, prompt in enumerate(["short", "a much longer prompt"]):
-        single = NEOChatModel._build_t2i_text_inputs(model, tokenizer, prompt)
+        single = NEOChatModel._build_t2i_text_inputs(
+            model, tokenizer, prompt
+        )  # noqa: leading-underscore -- existing native model or backend API
         length = single[0].shape[1]
         assert torch.equal(batched[0][index, :length], single[0][0])
         assert torch.equal(batched[1][index, :, :length], single[1])
@@ -185,7 +187,7 @@ def test_block_causal_mask_rejects_padded_keys():
 
 
 def test_builds_per_sample_image_indexes():
-    indexes = NEOChatModel._build_t2i_image_indexes(
+    indexes = NEOChatModel._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
         SimpleNamespace(),
         token_h=2,
         token_w=2,
@@ -206,12 +208,12 @@ def test_compacts_variable_length_kv_before_attention():
     v = torch.randn(2, 8, 2, 8, generator=generator)
     actual = _flash_or_sdpa(q, k, v, actual_seq_lengths_kv=[5, 8])
 
-    expected_short = _sdpa_attn_func(
+    expected_short = sdpa_attn_func(
         q[:1],
         torch.cat((k[:1, :2], k[:1, 5:]), dim=1),
         torch.cat((v[:1, :2], v[:1, 5:]), dim=1),
     )
-    expected_long = _sdpa_attn_func(q[1:], k[1:], v[1:])
+    expected_long = sdpa_attn_func(q[1:], k[1:], v[1:])
     torch.testing.assert_close(actual, torch.cat((expected_short, expected_long)))
 
 
@@ -221,8 +223,8 @@ def test_sdpa_masks_padded_prefix_keys():
     v = torch.tensor([[[[2.0, 0.0]], [[0.0, 4.0]], [[100.0, 100.0]]]])
     key_mask = torch.tensor([[[[True, True, False]]]])
 
-    actual = _sdpa_attn_func(q, k, v, attention_mask=key_mask)
-    expected = _sdpa_attn_func(q, k[:, :2], v[:, :2])
+    actual = sdpa_attn_func(q, k, v, attention_mask=key_mask)
+    expected = sdpa_attn_func(q, k[:, :2], v[:, :2])
 
     torch.testing.assert_close(actual, expected)
 
@@ -237,12 +239,12 @@ def test_randn_fallback_preserves_accelerator_rng(monkeypatch):
     if not device_module.is_available():
         pytest.skip(f"{device_type} is not available")
 
-    _force_generator_fallback(monkeypatch, device_type)
+    force_generator_fallback(monkeypatch, device_type)
     cpu_rng_state = torch.get_rng_state().clone()
     device_rng_state = device_module.get_rng_state(device).clone()
 
-    first = _randn_with_seed((2, 3), device=device, dtype=torch.float32, seed=17)
-    second = _randn_with_seed((2, 3), device=device, dtype=torch.float32, seed=17)
+    first = randn_with_seed((2, 3), device=device, dtype=torch.float32, seed=17)
+    second = randn_with_seed((2, 3), device=device, dtype=torch.float32, seed=17)
 
     assert torch.equal(first, second)
     assert torch.equal(torch.get_rng_state(), cpu_rng_state)
@@ -271,7 +273,9 @@ def test_shared_rmsnorm_uses_framework_dispatch():
 
     assert isinstance(norm, RMSNorm)
     assert norm.cast_x_before_out_mul
-    assert norm._forward_method != norm.forward_native
+    assert (
+        norm._forward_method != norm.forward_native
+    )  # noqa: leading-underscore -- existing native model or backend API
 
 
 def test_shared_rmsnorm_aiter_cpu_input_uses_native(monkeypatch):
@@ -283,7 +287,9 @@ def test_shared_rmsnorm_aiter_cpu_input_uses_native(monkeypatch):
         raise AssertionError("AITER must not receive CPU inputs")
 
     monkeypatch.setattr(RMSNorm, "forward_aiter", fail_aiter)
-    norm._forward_method = norm.forward_aiter
+    norm._forward_method = (
+        norm.forward_aiter
+    )  # noqa: leading-underscore -- existing native model or backend API
 
     actual = norm(hidden_states)
 
@@ -299,7 +305,9 @@ def test_shared_rmsnorm_npu_cpu_input_uses_native(monkeypatch):
         raise AssertionError("NPU RMSNorm must not receive CPU inputs")
 
     monkeypatch.setattr(RMSNorm, "forward_npu", fail_npu)
-    norm._forward_method = norm.forward_npu
+    norm._forward_method = (
+        norm.forward_npu
+    )  # noqa: leading-underscore -- existing native model or backend API
 
     actual = norm(hidden_states)
 
@@ -353,10 +361,10 @@ def test_batched_gqa_matches_unpadded_singletons():
     valid[0, 2:5] = False
     attention_mask = valid[:, None, None, :].expand(-1, -1, q.shape[1], -1)
 
-    actual = _sdpa_attn_func(q, k, v, attention_mask=attention_mask)
+    actual = sdpa_attn_func(q, k, v, attention_mask=attention_mask)
 
     for index in range(2):
-        expected = _sdpa_attn_func(
+        expected = sdpa_attn_func(
             q[index : index + 1],
             k[index : index + 1, valid[index]],
             v[index : index + 1, valid[index]],
@@ -376,7 +384,9 @@ def test_prefix_and_denoise_attention_match_singletons(monkeypatch):
         head_dim=16,
         max_position_embeddings=128,
     )
-    config._attn_implementation = "eager"
+    config._attn_implementation = (
+        "eager"  # noqa: leading-underscore -- existing native model or backend API
+    )
     with torch.random.fork_rng():
         torch.manual_seed(23)
         attention = Qwen3Attention(config, layer_idx=0).eval()
@@ -404,7 +414,7 @@ def test_prefix_and_denoise_attention_match_singletons(monkeypatch):
             batch_size=batch_size,
             prefix_lengths=torch.tensor(lengths),
         )
-        image_indexes = NEOChatModel._build_t2i_image_indexes(
+        image_indexes = NEOChatModel._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
             helper, 1, 3, torch.tensor(lengths), torch.device("cpu")
         )
         outputs = []
@@ -494,13 +504,13 @@ def test_generation_executor_uses_resolved_npu_device(monkeypatch):
         pin_cpu_memory=False,
     )
 
-    assert scheduler._fn is not None
-    assert scheduler._batch_fn is not None
-    assert scheduler._max_batch_size == 2
-    assert scheduler._max_batch_wait_s == 0.007
-    assert scheduler._batch_key_fn is stages.image_generation_batch_key
-    assert scheduler._request_cost_fn is stages.image_generation_request_cost
-    assert scheduler._max_batch_cost == 1234
+    assert scheduler.fn is not None
+    assert scheduler.batch_fn is not None
+    assert scheduler.max_batch_size == 2
+    assert scheduler.max_batch_wait_s == 0.007
+    assert scheduler.batch_key_fn is stages.image_generation_batch_key
+    assert scheduler.request_cost_fn is stages.image_generation_request_cost
+    assert scheduler.max_batch_cost == 1234
     assert calls == {
         "registered": True,
         "model_path": "/model/sensenova",

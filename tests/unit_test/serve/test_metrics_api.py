@@ -135,7 +135,7 @@ def test_images_finish_iteration_before_recording_success(
             super().__init__(None)
             self.exhausted = False
 
-        async def _generate_uninstrumented(
+        async def generate_uninstrumented(
             self, request: GenerateRequest, request_id: str
         ) -> AsyncGenerator[GenerateChunk, None]:
             yield GenerateChunk(

@@ -17,7 +17,7 @@ from sglang_omni.models.sensenova_u1.config import (
 from sglang_omni.pipeline.replicas import expand_replica_stages
 
 
-def _config(size=2, batch=1):
+def make_config(size=2, batch=1):
     data = SenseNovaU1PipelineConfig(model_path="/model/sensenova").model_dump()
     data["stages"][0]["tp_size"] = size
     data["stages"][0]["gpu"] = list(range(size))
@@ -27,20 +27,20 @@ def _config(size=2, batch=1):
 
 @pytest.mark.parametrize("size", [1, 2, 4, 8])
 def test_supported_tp_sizes(size):
-    config = SenseNovaU1PipelineConfig.model_validate(_config(size))
+    config = SenseNovaU1PipelineConfig.model_validate(make_config(size))
     assert config.stages[0].tp_size == size
 
 
 def test_tp_rejects_unsupported_size_and_dynamic_batching():
     with pytest.raises(ValueError, match="tp_size=1, 2, 4, or 8"):
-        SenseNovaU1PipelineConfig.model_validate(_config(3))
+        SenseNovaU1PipelineConfig.model_validate(make_config(3))
     with pytest.raises(ValueError, match="max_batch_size=1"):
-        SenseNovaU1PipelineConfig.model_validate(_config(batch=2))
-    assert SenseNovaU1PipelineConfig.model_validate(_config(1, 2))
+        SenseNovaU1PipelineConfig.model_validate(make_config(batch=2))
+    assert SenseNovaU1PipelineConfig.model_validate(make_config(1, 2))
 
 
 def test_dp_tp_expands_into_independent_gpu_groups():
-    data = _config()
+    data = make_config()
     data["processes"] = {
         "sensenova_generate": ProcessConfig(
             num_replicas=2, replica_devices=[0, 1, 2, 3]
@@ -56,7 +56,7 @@ def test_dp_tp_expands_into_independent_gpu_groups():
 
 
 def test_dp_tp_rejects_overlapping_replica_devices():
-    data = _config()
+    data = make_config()
     data["processes"] = {
         "sensenova_generate": ProcessConfig(
             num_replicas=2, replica_devices=[0, 1, 1, 2]
@@ -67,7 +67,7 @@ def test_dp_tp_rejects_overlapping_replica_devices():
 
 
 @pytest.mark.parametrize("name", ["sensenova_u1_tp2.yaml", "sensenova_u1_dp2_tp2.yaml"])
-def test_tp_example_config(name):
+def test_tp_example_make_config(name):
     path = Path(__file__).resolve().parents[3] / "examples" / "configs" / name
     config = ConfigManager.from_file(str(path)).config
     plan, stages = compile_logical_processes(config)

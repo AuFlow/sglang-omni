@@ -5,11 +5,11 @@ import threading
 
 import pytest
 
-from sglang_omni.scheduling.messages import IncomingMessage
+from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
 
 
-def _request(request_id):
+def request(request_id):
     return IncomingMessage(request_id=request_id, type="new_request", data=request_id)
 
 
@@ -33,8 +33,8 @@ def test_asymmetric_abort_preserves_collective_order():
         for scheduler in schedulers
     ]
     for scheduler in schedulers:
-        scheduler.inbox.put(_request("cancelled"))
-        scheduler.inbox.put(_request("next"))
+        scheduler.inbox.put(request("cancelled"))
+        scheduler.inbox.put(request("next"))
     try:
         threads[0].start()
         assert entered.wait(2)
@@ -83,8 +83,8 @@ def test_shutdown_drains_work_before_cleanup_on_compute_thread():
 
     scheduler = TensorParallelScheduler(compute, shutdown_callback=cleanup)
     thread = threading.Thread(target=scheduler.start, daemon=True)
-    scheduler.inbox.put(_request("active"))
-    scheduler.inbox.put(_request("queued"))
+    scheduler.inbox.put(request("active"))
+    scheduler.inbox.put(request("queued"))
     thread.start()
     try:
         assert entered.wait(2)
@@ -109,7 +109,7 @@ def test_stop_before_thread_start_still_drains_and_cleans_up():
         shutdown_callback=lambda: events.append("cleanup"),
     )
     scheduler.abort("queued")
-    scheduler.inbox.put(_request("queued"))
+    scheduler.inbox.put(request("queued"))
     scheduler.stop()
     thread = threading.Thread(target=scheduler.start, daemon=True)
     thread.start()
@@ -133,7 +133,7 @@ def test_failure_is_reported_while_cleanup_is_blocked():
 
     scheduler = TensorParallelScheduler(compute, shutdown_callback=cleanup)
     scheduler.failure_callback = failures.append
-    scheduler.inbox.put(_request("failed"))
+    scheduler.inbox.put(request("failed"))
 
     def run():
         try:
@@ -167,8 +167,8 @@ def test_forward_failure_does_not_reuse_collectives_for_the_next_request():
     scheduler = TensorParallelScheduler(
         compute, shutdown_callback=lambda: calls.append("cleanup")
     )
-    scheduler.inbox.put(_request("failed"))
-    scheduler.inbox.put(_request("next"))
+    scheduler.inbox.put(request("failed"))
+    scheduler.inbox.put(request("next"))
     with pytest.raises(RuntimeError, match="collective sequence cannot be reused"):
         scheduler.start()
     assert calls == ["failed", "cleanup"]

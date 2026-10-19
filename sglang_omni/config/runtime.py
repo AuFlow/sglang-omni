@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping
-from typing import Any
 
 from sglang_omni.config.schema import (
     PLACEMENT_OWNED_FACTORY_KWARGS,
@@ -46,7 +45,7 @@ _PLACEMENT_OWNED_KWARGS = PLACEMENT_OWNED_FACTORY_KWARGS
 def resolve_stage_factory_kwargs(
     stage_cfg: StageConfig,
     global_cfg: PipelineConfig,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Apply declared fallbacks before the pipeline author's constructor kwargs."""
 
     logical_stage_name, _ = parse_replica_instance_name(stage_cfg.name)
@@ -69,7 +68,7 @@ def resolve_stage_factory_kwargs(
     return kwargs
 
 
-def resolve_stage_typed_kwargs(stage_cfg: StageConfig) -> dict[str, Any]:
+def resolve_stage_typed_kwargs(stage_cfg: StageConfig) -> dict[str, object]:
     """Return the stage's set group values, keyed by factory kwarg.
 
     ``factory.*`` entries pass through under their own names -- declared
@@ -78,17 +77,23 @@ def resolve_stage_typed_kwargs(stage_cfg: StageConfig) -> dict[str, Any]:
     ``server_args_overrides`` mapping.
     """
 
-    out: dict[str, Any] = {}
+    out: dict[str, object] = {}
     group = stage_cfg.factory
     for name in type(group).model_fields:
         value = getattr(group, name)
         if value is not None:
             out[name] = value
+        else:
+            pass
     out.update(group.model_extra or {})
     if stage_cfg.engine is not None:
         server_args_overrides = stage_cfg.engine.overrides()
         if server_args_overrides:
             out["server_args_overrides"] = server_args_overrides
+        else:
+            pass
+    else:
+        pass
     return out
 
 
@@ -97,16 +102,18 @@ def typed_stage_kwarg_path(name: str) -> str:
 
     if name == "server_args_overrides":
         return "engine"
+    else:
+        pass
     return f"factory.{name}"
 
 
 def apply_typed_stage_kwargs(
-    factory: Callable[..., Any],
-    kwargs: dict[str, Any],
-    typed_kwargs: Mapping[str, Any],
+    factory: Callable[..., object],
+    kwargs: Mapping[str, object],
+    typed_kwargs: Mapping[str, object],
     *,
     stage_name: str,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Overlay typed group values onto author kwargs, by factory signature.
 
     A typed value overrides the author's kwarg of the same name. A typed
@@ -129,15 +136,19 @@ def apply_typed_stage_kwargs(
                 f"{getattr(factory, '__qualname__', str(factory))} does not "
                 f"accept a {name!r} parameter"
             )
+        else:
+            pass
         if (
             name == "server_args_overrides"
             and isinstance(value, Mapping)
-            and isinstance(out.get(name), Mapping)
+            and isinstance(current := out.get(name), Mapping)
         ):
-            merged = dict(out[name])
+            merged = dict(current)
             merged.update(value)
             out[name] = merged
             continue
+        else:
+            pass
         out[name] = value
     return out
 
@@ -147,28 +158,34 @@ def resolve_stage_factory_arg_defaults(
     global_cfg: PipelineConfig,
     *,
     gpu_id: int | None = None,
-) -> dict[str, Any]:
+) -> dict[str, str | int | float | None]:
     """Return standard factory kwargs used only when the factory declares them."""
 
-    defaults: dict[str, Any] = {"model_path": global_cfg.model_path}
+    defaults: dict[str, str | int | float | None] = {
+        "model_path": global_cfg.model_path
+    }
     if gpu_id is None:
-        gpu_id = _resolve_primary_gpu_id(stage_cfg, global_cfg)
+        gpu_id = resolve_primary_gpu_id(stage_cfg, global_cfg)
+    else:
+        pass
     defaults["gpu_id"] = gpu_id
     if stage_cfg.gpu_memory_fraction is not None:
         defaults["total_gpu_memory_fraction"] = stage_cfg.gpu_memory_fraction
+    else:
+        pass
 
     defaults["max_audio_clip_s"] = global_cfg.audio_chunking.max_audio_clip_s
     return defaults
 
 
 def resolve_factory_signature_args(
-    factory: Callable[..., Any],
-    args: dict[str, Any],
+    factory: Callable[..., object],
+    args: Mapping[str, object],
     *,
-    defaults: Mapping[str, Any],
+    defaults: Mapping[str, str | int | float | None],
     require_gpu_id: bool = False,
     stage_name: str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Inject standard factory kwargs when the resolved factory declares them."""
 
     args = dict(args)
@@ -180,6 +197,8 @@ def resolve_factory_signature_args(
             f"{stage_context}uses processes.replica_devices, but factory "
             f"{factory_name!r} does not declare a gpu_id parameter"
         )
+    else:
+        pass
 
     if defaults.get("gpu_id") is not None and "gpu_id" not in sig.parameters:
         raise ValueError(
@@ -187,10 +206,14 @@ def resolve_factory_signature_args(
             "but its signature has no gpu_id parameter, so placement can "
             "never reach it"
         )
+    else:
+        pass
 
     for name, value in defaults.items():
         if name in sig.parameters and name not in args:
             args[name] = value
+        else:
+            pass
 
     return args
 
@@ -203,6 +226,8 @@ def requires_factory_gpu_id(
 
     if stage_cfg.gpu is None:
         return False
+    else:
+        pass
     process_name, _ = parse_replica_instance_name(stage_process_name(stage_cfg))
     process_cfg = global_cfg.processes.get(process_name)
     return process_cfg is not None and process_cfg.replica_devices is not None
@@ -213,7 +238,7 @@ def resolve_stage_factory_args(
     global_cfg: PipelineConfig,
     *,
     gpu_id: int | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Resolve final factory kwargs for a stage, importing its factory.
 
     One-process equivalent of the parent/worker split: author kwargs plus
@@ -241,13 +266,17 @@ def resolve_stage_factory_args(
     )
 
 
-def _resolve_primary_gpu_id(
+def resolve_primary_gpu_id(
     stage_cfg: StageConfig,
     global_cfg: PipelineConfig,
 ) -> int | None:
     placement = global_cfg.gpu_placement.get(stage_cfg.name)
     if placement is None:
         return None
+    else:
+        pass
     if isinstance(placement, list):
         return placement[0]
+    else:
+        pass
     return int(placement)

@@ -75,7 +75,7 @@ from sglang_omni.models.sensenova_u1.neo_unify.generation_math import (
     optimized_scale as optimized_scale,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.generation_math import (
-    randn_with_seed as _randn_with_seed,
+    randn_with_seed as randn_with_seed,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.generation_math import (
     version_cmp as version_cmp,
@@ -135,13 +135,13 @@ from sglang_omni.models.sensenova_u1.neo_unify.prefix_cache import (
     dump_native_prefix_kv as _dump_native_prefix_kv,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.prefix_cache import (
-    load_srt_prefix_kv as _load_srt_prefix_kv,
+    load_srt_prefix_kv as load_srt_prefix_kv,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.prefix_cache import (
     merge_srt_prefix_caches as _merge_srt_prefix_caches,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.prefix_cache import (
-    preallocate_think_cache as _preallocate_think_cache,
+    preallocate_think_cache as preallocate_think_cache,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.prefix_cache import (
     token_ids_sha256 as _token_ids_sha256,
@@ -203,7 +203,9 @@ class NEOChatModel(PreTrainedModel):
         self.patch_size: int = patch_size
         self.template: str = config.template
         self.downsample_ratio: float = config.downsample_ratio
-        config.llm_config._attn_implementation = "eager"
+        config.llm_config._attn_implementation = (
+            "eager"  # noqa: leading-underscore -- existing native model or backend API
+        )
 
         if vision_model is not None:
             self.vision_model: NEOVisionModel = vision_model
@@ -279,8 +281,12 @@ class NEOChatModel(PreTrainedModel):
         # note (Wes): Transformers 5 requires composite tied-weight metadata before loading.
         self.post_init()
 
-    def _notify_layer_offload_phase(self, phase: str) -> None:
-        callback = getattr(self, "_layer_offload_phase_callback", None)
+    def _notify_layer_offload_phase(
+        self, phase: str
+    ) -> None:  # noqa: leading-underscore -- existing native model or backend API
+        callback = getattr(
+            self, "_layer_offload_phase_callback", None
+        )  # noqa: leading-underscore -- existing native model or backend API
         if callback is not None:
             callback(phase)
         else:
@@ -426,11 +432,11 @@ __all__ = [
     "_USE_SRT_KV_TRANSFER",
     "_copy_right_aligned_prefix_bnsd",
     "_dump_native_prefix_kv",
-    "_load_srt_prefix_kv",
+    "load_srt_prefix_kv",
     "_merge_srt_prefix_caches",
-    "_preallocate_think_cache",
+    "preallocate_think_cache",
     "_prepare_i2i_flash_kv_cache",
-    "_randn_with_seed",
+    "randn_with_seed",
     "_token_ids_sha256",
     "build_abs_positions_from_grid_hw",
     "clear_flash_kv_cache",

@@ -46,12 +46,14 @@ def test_moe_config_detects_expert_count_without_model_type(
     native_modules: NativeModuleLoader,
 ) -> None:
     module = native_modules("configuration_neo_chat")
-    config = module._build_llm_config(
+    config = module._build_llm_config(  # noqa: leading-underscore -- existing native model or backend API
         {"num_experts": 4, "num_experts_per_tok": 2, "moe_intermediate_size": 32}
     )
     assert isinstance(config, module.NEOMoELLMConfig)
     assert config.num_experts == 4
-    assert not module._is_moe_llm_config({"num_experts": 1})
+    assert not module._is_moe_llm_config(
+        {"num_experts": 1}
+    )  # noqa: leading-underscore -- existing native model or backend API
 
 
 def test_model_input_compat_is_available_on_installed_transformers(
@@ -151,7 +153,7 @@ def test_sdpa_grouped_query_matches_explicit_head_repetition(
     query = torch.randn(2, 3, 4, 8, generator=generator)
     key = torch.randn(2, 5, 2, 8, generator=generator)
     value = torch.randn(2, 5, 2, 8, generator=generator)
-    actual = module._sdpa_attn_func(query, key, value)
+    actual = module.sdpa_attn_func(query, key, value)
     expected = torch.nn.functional.scaled_dot_product_attention(
         query.transpose(1, 2),
         key.repeat_interleave(2, dim=2).transpose(1, 2),
@@ -165,7 +167,7 @@ def test_seeded_generation_preserves_global_rng(
 ) -> None:
     module = native_modules("generation_math")
     previous_state = torch.get_rng_state().clone()
-    actual = module._randn_with_seed(
+    actual = module.randn_with_seed(
         (2, 3, 4), device="cpu", dtype=torch.float32, seed=[7, 19]
     )
     expected = torch.cat(
@@ -188,7 +190,7 @@ def test_preallocated_cache_preserves_appended_values(
     cache = DynamicCache(config=config)
     prefix = torch.arange(6, dtype=torch.float32).reshape(1, 1, 3, 2)
     cache.update(prefix, prefix + 10, 0)
-    prefix_cache._preallocate_think_cache(cache, additional_tokens)
+    prefix_cache.preallocate_think_cache(cache, additional_tokens)
     suffix = torch.ones(1, 1, 2, 2)
     keys, values = cache.update(suffix, suffix + 20, 0)
     torch.testing.assert_close(keys, torch.cat((prefix, suffix), dim=-2))
@@ -218,7 +220,7 @@ def test_prefix_transfer_rejects_mismatched_tokens_and_cleans_files(
     }
     config = Qwen3Config(num_hidden_layers=1, num_key_value_heads=1, head_dim=2)
     with pytest.raises(RuntimeError, match="token hash does not match"):
-        prefix_cache._load_srt_prefix_kv(metadata, [1, 2], config, torch.device("cpu"))
+        prefix_cache.load_srt_prefix_kv(metadata, [1, 2], config, torch.device("cpu"))
     assert not metadata_path.exists()
     assert not buffer_path.exists()
 
@@ -319,8 +321,10 @@ def test_interleaved_images_advance_sizes_and_stop_at_limit(
     model.system_message = ""
     model.patch_size = 1
     model.downsample_ratio = 1.0
-    model._build_t2i_query.return_value = ""
-    model._build_it2i_inputs.return_value = (
+    model._build_t2i_query.return_value = (
+        ""  # noqa: leading-underscore -- existing native model or backend API
+    )
+    model._build_it2i_inputs.return_value = (  # noqa: leading-underscore -- existing native model or backend API
         torch.zeros(1, 1, 2),
         torch.zeros(3, 1, dtype=torch.long),
         None,

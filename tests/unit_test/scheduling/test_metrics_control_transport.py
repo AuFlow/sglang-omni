@@ -34,7 +34,7 @@ def metrics_worker(
         try:
             await plane.start()
             connection.send(
-                plane._recv_socket._socket.getsockopt_string(zmq.LAST_ENDPOINT)
+                plane.recv_socket.socket.getsockopt_string(zmq.LAST_ENDPOINT)
             )
             message = await asyncio.wait_for(plane.recv(), 15)
             assert isinstance(message, AdminMessage)
@@ -84,10 +84,10 @@ def test_metrics_admin_round_trip_over_tcp_to_spawned_worker() -> None:
         process = None
         try:
             await plane.start()
-            completion = plane._completion_socket._socket.getsockopt_string(
+            completion = plane.completion_socket.socket.getsockopt_string(
                 zmq.LAST_ENDPOINT
             )
-            abort = plane._abort_socket._socket.getsockopt_string(zmq.LAST_ENDPOINT)
+            abort = plane.abort_socket.socket.getsockopt_string(zmq.LAST_ENDPOINT)
             process = context.Process(
                 target=metrics_worker, args=(sender, completion, abort)
             )

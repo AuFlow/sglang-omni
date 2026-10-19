@@ -26,7 +26,7 @@ NPU_ROTARY_MUL_HEAD_DIMENSION_LIMIT = 896
 CUDA_FUSED_ROPE_MIN_SEQUENCE_LENGTH = 128
 
 
-_SENSENOVA_NPU_ROTARY_MUL_DISABLED = False
+SENSENOVA_NPU_ROTARY_MUL_DISABLED = False
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -73,9 +73,9 @@ def can_use_sensenova_npu_fused_rope(
 def sensenova_npu_rotary_mul(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
-    global _SENSENOVA_NPU_ROTARY_MUL_DISABLED
+    global SENSENOVA_NPU_ROTARY_MUL_DISABLED
 
-    if _SENSENOVA_NPU_ROTARY_MUL_DISABLED:
+    if SENSENOVA_NPU_ROTARY_MUL_DISABLED:
         return None
     else:
         pass
@@ -83,11 +83,11 @@ def sensenova_npu_rotary_mul(
     try:
         import torch_npu
     except ImportError:
-        _SENSENOVA_NPU_ROTARY_MUL_DISABLED = True
+        SENSENOVA_NPU_ROTARY_MUL_DISABLED = True
         return None
 
     if not hasattr(torch_npu, "npu_rotary_mul"):
-        _SENSENOVA_NPU_ROTARY_MUL_DISABLED = True
+        SENSENOVA_NPU_ROTARY_MUL_DISABLED = True
         return None
     else:
         pass
@@ -100,7 +100,7 @@ def sensenova_npu_rotary_mul(
             torch_npu.npu_rotary_mul(k, cos, sin, rotary_mode="half"),
         )
     except (RuntimeError, TypeError):
-        _SENSENOVA_NPU_ROTARY_MUL_DISABLED = True
+        SENSENOVA_NPU_ROTARY_MUL_DISABLED = True
         return None
 
 
@@ -222,7 +222,7 @@ class Qwen3RotaryEmbedding(nn.Module):
             head_dim = getattr(cfg2, "head_dim", None)
             if head_dim is None:
                 head_dim = cfg2.hidden_size // cfg2.num_attention_heads
-                setattr(cfg2, "head_dim", head_dim)
+                cfg2.head_dim = head_dim
             else:
                 pass
             cfg2.head_dim = int(head_dim) * 2

@@ -10,7 +10,7 @@ import torch
 from sglang_omni.models.sensenova_u1.neo_unify import modeling_qwen3
 
 
-def _inputs(device="cpu"):
+def inputs(device="cpu"):
     q = torch.arange(24, dtype=torch.float16, device=device).reshape(1, 2, 3, 4)
     k = q + 1
     cos = torch.full((1, 3, 4), 0.5, dtype=torch.float16, device=device)
@@ -18,7 +18,7 @@ def _inputs(device="cpu"):
     return q, k, cos, sin
 
 
-def _eager(q, k, cos, sin):
+def eager(q, k, cos, sin):
     cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
     return (
         q * cos + modeling_qwen3.rotate_half(q) * sin,
@@ -27,7 +27,7 @@ def _eager(q, k, cos, sin):
 
 
 def test_npu_rotary_mul_opt_in_uses_half_layout(monkeypatch):
-    q, k, cos, sin = _inputs()
+    q, k, cos, sin = inputs()
     calls = []
 
     def fake_rotary_mul(x, cos_arg, sin_arg, rotary_mode):
@@ -39,35 +39,35 @@ def test_npu_rotary_mul_opt_in_uses_half_layout(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "torch_npu", SimpleNamespace(npu_rotary_mul=fake_rotary_mul)
     )
-    monkeypatch.setattr(modeling_qwen3, "_SENSENOVA_NPU_ROTARY_MUL_DISABLED", False)
+    monkeypatch.setattr(modeling_qwen3, "SENSENOVA_NPU_ROTARY_MUL_DISABLED", False)
     monkeypatch.setattr(
         modeling_qwen3, "_can_use_sensenova_npu_fused_rope", lambda *_: True
     )
     monkeypatch.setenv("SGLANG_SENSENOVA_NPU_FUSED_ROPE", "rotary_mul")
 
     actual = modeling_qwen3.apply_rotary_pos_emb(q, k, cos, sin)
-    for result, expected in zip(actual, _eager(q, k, cos, sin)):
+    for result, expected in zip(actual, eager(q, k, cos, sin)):
         torch.testing.assert_close(result, expected, atol=0, rtol=0)
     assert len(calls) == 2
 
 
 def test_npu_rotary_mul_failure_falls_back(monkeypatch):
-    q, k, cos, sin = _inputs()
+    q, k, cos, sin = inputs()
 
     def fail(*args, **kwargs):
         raise RuntimeError("unsupported")
 
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_rotary_mul=fail))
-    monkeypatch.setattr(modeling_qwen3, "_SENSENOVA_NPU_ROTARY_MUL_DISABLED", False)
+    monkeypatch.setattr(modeling_qwen3, "SENSENOVA_NPU_ROTARY_MUL_DISABLED", False)
     monkeypatch.setattr(
         modeling_qwen3, "_can_use_sensenova_npu_fused_rope", lambda *_: True
     )
     monkeypatch.setenv("SGLANG_SENSENOVA_NPU_FUSED_ROPE", "1")
 
     actual = modeling_qwen3.apply_rotary_pos_emb(q, k, cos, sin)
-    for result, expected in zip(actual, _eager(q, k, cos, sin)):
+    for result, expected in zip(actual, eager(q, k, cos, sin)):
         torch.testing.assert_close(result, expected, atol=0, rtol=0)
-    assert modeling_qwen3._SENSENOVA_NPU_ROTARY_MUL_DISABLED
+    assert modeling_qwen3.SENSENOVA_NPU_ROTARY_MUL_DISABLED
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -103,6 +103,6 @@ def test_cuda_bf16_rope_matches_eager(axis, monkeypatch):
     q, k = q.transpose(1, 2), k.transpose(1, 2)
 
     actual = modeling_qwen3.apply_rotary_pos_emb(q, k, cos, sin)
-    for result, expected in zip(actual, _eager(q, k, cos, sin)):
+    for result, expected in zip(actual, eager(q, k, cos, sin)):
         torch.testing.assert_close(result, expected, atol=0, rtol=0)
     assert len(calls) == 2

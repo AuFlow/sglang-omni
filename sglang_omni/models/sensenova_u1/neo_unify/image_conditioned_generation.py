@@ -44,14 +44,18 @@ def it2i_generate(
     max_think_tokens: int = 1024,
     usage: dict[str, int] | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, str]:
-    if getattr(self, "_sensenova_compact_mode", False):
+    if getattr(
+        self, "_sensenova_compact_mode", False
+    ):  # noqa: leading-underscore -- existing native model or backend API
         raise RuntimeError(
             "SenseNova compact mode currently supports text-to-image only"
         )
     else:
         pass
     assert cfg_norm in ["none", "global", "channel"]
-    self._notify_layer_offload_phase("prefix")
+    self._notify_layer_offload_phase(
+        "prefix"
+    )  # noqa: leading-underscore -- existing native model or backend API
 
     self.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
     self.config.t_eps = t_eps
@@ -99,18 +103,22 @@ def it2i_generate(
     think_content = (
         "<think>\n" if think_mode else "<think>\n\n</think>\n\n" + IMG_START_TOKEN
     )
-    query_condition = self._build_t2i_query(
+    query_condition = self._build_t2i_query(  # noqa: leading-underscore -- existing native model or backend API
         question_condition,
         system_message=SYSTEM_MESSAGE_FOR_GEN,
         append_text=think_content,
     )
     query_img_condition = (
-        self._build_t2i_query("<image>" * len(images), append_text=IMG_START_TOKEN)
+        self._build_t2i_query(
+            "<image>" * len(images), append_text=IMG_START_TOKEN
+        )  # noqa: leading-underscore -- existing native model or backend API
         if needs_img_condition
         else None
     )
     query_uncondition = (
-        self._build_t2i_query("", append_text=IMG_START_TOKEN)
+        self._build_t2i_query(
+            "", append_text=IMG_START_TOKEN
+        )  # noqa: leading-underscore -- existing native model or backend API
         if needs_uncondition
         else None
     )
@@ -137,14 +145,16 @@ def it2i_generate(
         pass
 
     input_embeds_condition, indexes_condition, attention_mask_condition_prefix = (
-        self._build_it2i_inputs(tokenizer, query_condition, pixel_values, grid_hw)
+        self._build_it2i_inputs(
+            tokenizer, query_condition, pixel_values, grid_hw
+        )  # noqa: leading-underscore -- existing native model or backend API
     )
     if query_img_condition is not None:
         (
             input_embeds_img_condition,
             indexes_img_condition,
             attention_mask_img_condition_prefix,
-        ) = self._build_it2i_inputs(
+        ) = self._build_it2i_inputs(  # noqa: leading-underscore -- existing native model or backend API
             tokenizer, query_img_condition, pixel_values, grid_hw
         )
     else:
@@ -156,7 +166,9 @@ def it2i_generate(
             input_embeds_uncondition,
             indexes_uncondition,
             attention_mask_uncondition_prefix,
-        ) = self._build_it2i_inputs(tokenizer, query_uncondition)
+        ) = self._build_it2i_inputs(
+            tokenizer, query_uncondition
+        )  # noqa: leading-underscore -- existing native model or backend API
     else:
         input_embeds_uncondition = indexes_uncondition = (
             attention_mask_uncondition_prefix
@@ -165,14 +177,14 @@ def it2i_generate(
     token_h = image_size[1] // (self.patch_size * merge_size)
     token_w = image_size[0] // (self.patch_size * merge_size)
 
-    indexes_image_condition = self._build_t2i_image_indexes(
+    indexes_image_condition = self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
         token_h,
         token_w,
         indexes_condition[0].max() + 1,
         device=input_embeds_condition.device,
     )
     indexes_image_img_condition = (
-        self._build_t2i_image_indexes(
+        self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
             token_h,
             token_w,
             indexes_img_condition[0].max() + 1,
@@ -182,7 +194,7 @@ def it2i_generate(
         else None
     )
     indexes_image_uncondition = (
-        self._build_t2i_image_indexes(
+        self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
             token_h,
             token_w,
             indexes_uncondition[0].max() + 1,
@@ -193,7 +205,7 @@ def it2i_generate(
     )
 
     if think_mode:
-        outputs_condition = self._think_prefix_forward(
+        outputs_condition = self._think_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
             inputs_embeds=input_embeds_condition,
             indexes=indexes_condition,
             attention_mask=attention_mask_condition_prefix,
@@ -202,15 +214,17 @@ def it2i_generate(
         device = outputs_condition.logits.device
         dtype = outputs_condition.logits.dtype
         t_index_condition = indexes_condition[0].max().item()
-        past_key_values_condition, t_index_condition, think_text = self._generate_think(
-            tokenizer,
-            outputs_condition,
-            past_key_values_condition,
-            t_index_condition,
-            IMG_START_TOKEN,
-            max_think_tokens=max_think_tokens,
+        past_key_values_condition, t_index_condition, think_text = (
+            self._generate_think(  # noqa: leading-underscore -- existing native model or backend API
+                tokenizer,
+                outputs_condition,
+                past_key_values_condition,
+                t_index_condition,
+                IMG_START_TOKEN,
+                max_think_tokens=max_think_tokens,
+            )
         )
-        indexes_image_condition = self._build_t2i_image_indexes(
+        indexes_image_condition = self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
             token_h,
             token_w,
             t_index_condition + 1,
@@ -218,29 +232,35 @@ def it2i_generate(
         )
         del outputs_condition
     else:
-        past_key_values_condition, prefix_hidden_states = self._it2i_prefix_forward(
-            input_embeds_condition,
-            indexes_condition,
-            attention_mask_condition_prefix,
+        past_key_values_condition, prefix_hidden_states = (
+            self._it2i_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
+                input_embeds_condition,
+                indexes_condition,
+                attention_mask_condition_prefix,
+            )
         )
         device = prefix_hidden_states.device
         dtype = prefix_hidden_states.dtype
         del prefix_hidden_states
     past_key_values_img_condition = None
     if input_embeds_img_condition is not None:
-        past_key_values_img_condition, _ = self._it2i_prefix_forward(
-            input_embeds_img_condition,
-            indexes_img_condition,
-            attention_mask_img_condition_prefix,
+        past_key_values_img_condition, _ = (
+            self._it2i_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
+                input_embeds_img_condition,
+                indexes_img_condition,
+                attention_mask_img_condition_prefix,
+            )
         )
     else:
         pass
     past_key_values_uncondition = None
     if input_embeds_uncondition is not None:
-        past_key_values_uncondition, _ = self._it2i_prefix_forward(
-            input_embeds_uncondition,
-            indexes_uncondition,
-            attention_mask_uncondition_prefix,
+        past_key_values_uncondition, _ = (
+            self._it2i_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
+                input_embeds_uncondition,
+                indexes_uncondition,
+                attention_mask_uncondition_prefix,
+            )
         )
     else:
         pass
@@ -263,7 +283,9 @@ def it2i_generate(
         )
     else:
         pass
-    self._notify_layer_offload_phase("denoise")
+    self._notify_layer_offload_phase(
+        "denoise"
+    )  # noqa: leading-underscore -- existing native model or backend API
 
     image_prediction = conditioned_image_denoise(
         batch_size,

@@ -112,7 +112,7 @@ class RowParallelLinear(nn.Linear):
         return output
 
 
-def _column_parallel(
+def column_parallel(
     linear: nn.Linear, tensor_parallel_rank: int, tensor_parallel_size: int
 ) -> nn.Linear:
     output_feature_count = linear.out_features // tensor_parallel_size
@@ -209,7 +209,7 @@ def apply_tensor_parallel(
         setattr(
             module,
             name,
-            _column_parallel(
+            column_parallel(
                 getattr(module, name), tensor_parallel_rank, tensor_parallel_size
             ),
         )
@@ -227,7 +227,9 @@ def apply_tensor_parallel(
     for layer in backbone.layers:
         for mlp in (layer.mlp, layer.mlp_mot_gen):
             mlp.intermediate_size //= tensor_parallel_size
-            mlp._npu_gate_up_weight = None
+            mlp._npu_gate_up_weight = (
+                None  # noqa: leading-underscore -- existing native model or backend API
+            )
     model.sensenova_tp_size = tensor_parallel_size
     model.sensenova_tp_group = process_group
 

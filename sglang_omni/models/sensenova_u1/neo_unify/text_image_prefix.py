@@ -66,7 +66,7 @@ def text_image_prefix(
                     think_token_ids,
                     think_texts,
                     transfer_context,
-                ) = self._request_srt_think_tokens(
+                ) = self._request_srt_think_tokens(  # noqa: leading-underscore -- existing native model or backend API
                     tokenizer,
                     thinking_backend,
                     input_ids_condition,
@@ -80,7 +80,7 @@ def text_image_prefix(
                     indexes_condition,
                     condition_key_valid_mask,
                     condition_prefix_lengths,
-                ) = self._replay_srt_think_prefix(
+                ) = self._replay_srt_think_prefix(  # noqa: leading-underscore -- existing native model or backend API
                     tokenizer,
                     input_ids_condition,
                     condition_prefix_lengths,
@@ -124,7 +124,7 @@ def text_image_prefix(
             pass
 
         if not used_srt:
-            outputs_condition = self._think_prefix_forward(
+            outputs_condition = self._think_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
                 input_ids=input_ids_condition,
                 indexes=indexes_condition,
                 attention_mask=attention_mask_condition_prefix,
@@ -135,7 +135,7 @@ def text_image_prefix(
             t_index_condition = indexes_condition[0].max().item()
             profiler.mark("condition_prefill")
             past_key_values_condition, t_index_condition, think_text = (
-                self._generate_think(
+                self._generate_think(  # noqa: leading-underscore -- existing native model or backend API
                     tokenizer,
                     outputs_condition,
                     past_key_values_condition,
@@ -163,7 +163,7 @@ def text_image_prefix(
             )
         else:
             image_text_len = t_index_condition + 1
-        indexes_image_condition = self._build_t2i_image_indexes(
+        indexes_image_condition = self._build_t2i_image_indexes(  # noqa: leading-underscore -- existing native model or backend API
             token_h,
             token_w,
             image_text_len,
@@ -180,7 +180,7 @@ def text_image_prefix(
                 (
                     past_key_values_condition,
                     self.last_srt_kv_transfer_timings,
-                ) = self._try_import_srt_text_prefix(
+                ) = self._try_import_srt_text_prefix(  # noqa: leading-underscore -- existing native model or backend API
                     thinking_backend,
                     input_ids_condition,
                     condition_prefix_lengths[0],
@@ -193,7 +193,7 @@ def text_image_prefix(
                 (
                     past_key_values_condition,
                     self.last_srt_kv_transfer_timings_list,
-                ) = self._try_import_srt_text_prefix_batch(
+                ) = self._try_import_srt_text_prefix_batch(  # noqa: leading-underscore -- existing native model or backend API
                     thinking_backend,
                     input_ids_condition,
                     condition_prefix_lengths,
@@ -223,7 +223,7 @@ def text_image_prefix(
             (
                 past_key_values_condition,
                 prefix_hidden_states,
-            ) = self._t2i_prefix_forward(
+            ) = self._t2i_prefix_forward(  # noqa: leading-underscore -- existing native model or backend API
                 input_ids_condition,
                 indexes_condition,
                 attention_mask_condition_prefix,

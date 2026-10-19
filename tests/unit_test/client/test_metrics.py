@@ -48,7 +48,7 @@ def test_merged_audio_preserves_only_decode_token_metrics(
         if decode_usage
         else {"text": "hello"}
     )
-    chunk = Client._default_result_builder(
+    chunk = Client.default_result_builder(
         "merged",
         {
             "decode": decode_result,
@@ -109,7 +109,7 @@ def test_nonstream_image_metrics_keep_logical_stage(
         )
         coordinator.control_plane = RecordingCoordinatorControlPlane()
         coordinator.register_stage("preprocess", "inproc://preprocess")
-        coordinator._replica_topology = ReplicaTopology(
+        coordinator.replica_topology = ReplicaTopology(
             replicas={"generate": ("generate@r0",)}
         )
         metrics = RequestMetrics("test")
@@ -117,16 +117,16 @@ def test_nonstream_image_metrics_keep_logical_stage(
             coordinator.request_metrics = metrics
         else:
             pass
-        await coordinator._submit_request("image-request", {"text": "hello"})
+        await coordinator.submit_request("image-request", {"text": "hello"})
         original = {"image_b64": "encoded-image"}
-        await coordinator._handle_completion(
+        await coordinator.handle_completion(
             CompleteMessage("image-request", terminal, True, result=original)
         )
-        result = coordinator._completion_futures["image-request"].result()
+        result = coordinator.completion_futures["image-request"].result()
         assert "stage_name" not in original
         if enabled:
             assert result["stage_name"] == "generate"
-            chunk = Client._default_result_builder("image-request", result)
+            chunk = Client.default_result_builder("image-request", result)
 
             async def source() -> AsyncGenerator[GenerateChunk, None]:
                 yield chunk
@@ -163,7 +163,7 @@ def test_cache_metrics_do_not_require_chat_usage_extensions(
         "completion_tokens": 2,
         **cache_fields,
     }
-    chunk = Client._default_result_builder("cache-request", result)
+    chunk = Client.default_result_builder("cache-request", result)
     assert chunk.usage.prompt_tokens_details == {"cached_tokens": 4}
     assert "prompt_tokens_details" not in chunk.usage.to_dict()
 
@@ -195,7 +195,7 @@ def test_client_coordinator_token_telemetry_does_not_leak(
 
     class FakeCoordinator:
         request_metrics: RequestMetrics = metrics
-        _replica_topology: ReplicaTopology = ReplicaTopology(
+        replica_topology: ReplicaTopology = ReplicaTopology(
             replicas={"decode": ("decode@r0",)}
         )
 
@@ -208,7 +208,7 @@ def test_client_coordinator_token_telemetry_does_not_leak(
                     modality="metrics",
                     chunk={"prompt_tokens": 10, "completion_tokens": count},
                 )
-                await Coordinator._handle_stream(
+                await Coordinator.handle_stream(
                     self, deserialize_message(serialize_message(message))
                 )
 

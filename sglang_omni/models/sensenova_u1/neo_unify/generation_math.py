@@ -155,4 +155,4 @@ def build_abs_positions_from_grid_hw(
 
 
 # note (Codex): Preserve existing import and serialized class lookup names.
-_randn_with_seed = randn_with_seed
+randn_with_seed = randn_with_seed

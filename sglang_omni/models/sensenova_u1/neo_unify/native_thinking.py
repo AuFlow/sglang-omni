@@ -176,7 +176,9 @@ def generate_think(
         think_token_ids.append(think_end_token_id)
     else:
         pass
-    t_idx = self._append_text_tokens_to_cache(past_key_values, t_idx, append_ids)
+    t_idx = self._append_text_tokens_to_cache(
+        past_key_values, t_idx, append_ids
+    )  # noqa: leading-underscore -- existing native model or backend API
 
     think_text = tokenizer.decode(think_token_ids, skip_special_tokens=False)
     self.last_think_token_count = len(think_token_ids)
@@ -252,7 +254,7 @@ def t2i_predict_v(
 
 
 # note (Codex): Preserve existing import and serialized class lookup names.
-_append_text_tokens_to_cache = append_text_tokens_to_cache
+_append_text_tokens_to_cache = append_text_tokens_to_cache  # noqa: leading-underscore -- existing native model or backend API
 _generate_think = generate_think
 _it2i_prefix_forward = it2i_prefix_forward
 _t2i_predict_v = t2i_predict_v

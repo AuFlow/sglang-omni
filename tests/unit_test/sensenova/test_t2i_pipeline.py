@@ -25,7 +25,7 @@ from sglang_omni.models.sensenova_u1.stages import (
 )
 from sglang_omni.pipeline.replicas import expand_replica_stages
 from sglang_omni.proto.request import OmniRequest, StagePayload
-from sglang_omni.serve.openai_api import _image_result_with_disconnect_watch, create_app
+from sglang_omni.serve.openai_api import create_app, image_result_with_disconnect_watch
 
 
 @pytest.mark.asyncio
@@ -52,7 +52,7 @@ async def test_image_result_cancellation_aborts_backend_and_closes_stream(discon
             aborted.append(request_id)
 
     task = asyncio.create_task(
-        _image_result_with_disconnect_watch(Request(), ImageClient(), object(), "req")
+        image_result_with_disconnect_watch(Request(), ImageClient(), object(), "req")
     )
     await asyncio.wait_for(entered.wait(), timeout=1)
     if not disconnect:
@@ -98,8 +98,12 @@ def test_i2i_model_counts_preprocessed_reference_tokens(
         downsample_ratio=downsample_ratio,
         config=Mock(),
     )
-    model._build_t2i_query.return_value = "<image>" * len(reference_sizes)
-    model._build_it2i_inputs.side_effect = RuntimeError("Stop before model inference")
+    model._build_t2i_query.return_value = "<image>" * len(
+        reference_sizes
+    )  # noqa: leading-underscore -- existing native model or backend API
+    model._build_it2i_inputs.side_effect = RuntimeError(
+        "Stop before model inference"
+    )  # noqa: leading-underscore -- existing native model or backend API
     token_usage: dict[str, int] = {}
 
     with pytest.raises(RuntimeError, match="Stop before model inference"):
@@ -114,7 +118,9 @@ def test_i2i_model_counts_preprocessed_reference_tokens(
         )
 
     assert token_usage == {"image_tokens": expected_image_tokens}
-    query = model._build_it2i_inputs.call_args.args[1]
+    query = model._build_it2i_inputs.call_args.args[
+        1
+    ]  # noqa: leading-underscore -- existing native model or backend API
     assert query.count("<IMG_CONTEXT>") == expected_image_tokens
     assert "<image>" not in query
 
@@ -191,7 +197,7 @@ def test_t2i_stage_rejects_invalid_output(tokenizer: PreTrainedTokenizerBase) ->
         raise AssertionError("Invalid model output was accepted")
 
 
-def _decode_result_pixel(payload):
+def decode_result_pixel(payload):
     image = Image.open(io.BytesIO(base64.b64decode(payload.data["image_b64"])))
     return image.getpixel((0, 0))
 
@@ -233,7 +239,7 @@ def test_t2i_stage_batches_compatible_requests_with_per_request_seeds(
     assert kwargs["seed"] == [7, 19]
     assert kwargs["image_size"] == (64, 32)
     assert kwargs["num_steps"] == 12
-    assert [_decode_result_pixel(result) for result in results] == [
+    assert [decode_result_pixel(result) for result in results] == [
         (0, 0, 0),
         (255, 255, 255),
     ]
@@ -285,7 +291,7 @@ def test_t2i_stage_splits_incompatible_requests_and_restores_order(
         "test-1",
         "test-2",
     ]
-    assert [_decode_result_pixel(result) for result in results] == [
+    assert [decode_result_pixel(result) for result in results] == [
         (0, 0, 0),
         (255, 255, 255),
         (127, 127, 127),
@@ -534,7 +540,7 @@ def test_i2i_stage_preserves_reference_aspect_ratio_without_explicit_size(
     assert image.size == (384, 192)
 
 
-class _ImageClient:
+class ImageClient:
     async def generate(self, request, request_id):
         assert request.extra_params["width"] == 32
         assert request.output_modalities == ["image"]
@@ -546,7 +552,7 @@ class _ImageClient:
         )
 
 
-class _ImageEditClient:
+class ImageEditClient:
     async def generate(self, request, request_id):
         assert request.prompt["task"] == "image_edit"
         assert request.prompt["prompt"] == "make the background blue"
@@ -573,7 +579,7 @@ class _ImageEditClient:
         )
 
 
-class _DefaultImageEditClient:
+class DefaultImageEditClient:
     def __init__(self, expected_images=1):
         self.expected_images = expected_images
 
@@ -597,7 +603,7 @@ class _DefaultImageEditClient:
         )
 
 
-class _MultipleOutputImageEditClient:
+class MultipleOutputImageEditClient:
     def __init__(self):
         self.seeds = []
 
@@ -614,7 +620,7 @@ class _MultipleOutputImageEditClient:
 
 def test_image_api_exposes_image_only_for_sensenova():
     app = create_app(
-        _ImageClient(), model_name="sensenova", architectures=["NEOChatModel"]
+        ImageClient(), model_name="sensenova", architectures=["NEOChatModel"]
     )
     client = TestClient(app)
     response = client.post(
@@ -631,7 +637,7 @@ def test_image_api_exposes_image_only_for_sensenova():
     )
     assert invalid.status_code == 400
 
-    other = TestClient(create_app(_ImageClient(), architectures=["OtherModel"]))
+    other = TestClient(create_app(ImageClient(), architectures=["OtherModel"]))
     assert (
         other.post("/v1/images/generations", json={"prompt": "a cat"}).status_code
         == 404
@@ -648,7 +654,7 @@ def test_image_api_exposes_image_only_for_sensenova():
 
 def test_image_edit_api_accepts_one_reference_image():
     app = create_app(
-        _ImageEditClient(), model_name="sensenova", architectures=["NEOChatModel"]
+        ImageEditClient(), model_name="sensenova", architectures=["NEOChatModel"]
     )
     client = TestClient(app)
     reference = io.BytesIO()
@@ -677,7 +683,7 @@ def test_image_edit_api_accepts_one_reference_image():
 
 def test_image_edit_api_uses_sglang_defaults_when_omitted():
     app = create_app(
-        _DefaultImageEditClient(),
+        DefaultImageEditClient(),
         model_name="sensenova",
         architectures=["NEOChatModel"],
     )
@@ -696,7 +702,7 @@ def test_image_edit_api_uses_sglang_defaults_when_omitted():
 
 def test_image_edit_api_accepts_multiple_reference_images():
     app = create_app(
-        _DefaultImageEditClient(expected_images=2),
+        DefaultImageEditClient(expected_images=2),
         model_name="sensenova",
         architectures=["NEOChatModel"],
     )
@@ -715,7 +721,7 @@ def test_image_edit_api_accepts_multiple_reference_images():
 
 
 def test_image_edit_api_expands_n_with_sequential_seeds():
-    image_client = _MultipleOutputImageEditClient()
+    image_client = MultipleOutputImageEditClient()
     app = create_app(
         image_client,
         model_name="sensenova",
@@ -738,7 +744,7 @@ def test_image_edit_api_expands_n_with_sequential_seeds():
 
 def test_image_edit_api_rejects_unsupported_or_invalid_inputs():
     app = create_app(
-        _ImageEditClient(), model_name="sensenova", architectures=["NEOChatModel"]
+        ImageEditClient(), model_name="sensenova", architectures=["NEOChatModel"]
     )
     client = TestClient(app)
     reference = io.BytesIO()
@@ -823,7 +829,7 @@ def test_sensenova_accepts_tp_and_rejects_same_gpu_dp():
 
 
 def test_client_preserves_generated_image():
-    chunk = Client._default_result_builder(
+    chunk = Client.default_result_builder(
         "test", {"image_b64": "cG5n", "modality": "image"}
     )
     assert chunk.image_b64 == "cG5n"
@@ -831,7 +837,7 @@ def test_client_preserves_generated_image():
 
 
 def test_client_preserves_multiple_generated_images():
-    chunk = Client._default_result_builder(
+    chunk = Client.default_result_builder(
         "multi", {"images_b64": ["a", "b"], "modality": "image"}
     )
     assert chunk.images_b64 == ["a", "b"]
