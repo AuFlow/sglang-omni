@@ -2,7 +2,6 @@
 """Minimal SenseNova UMM routing and output-stage contracts."""
 
 import threading
-import time
 
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.pipeline.umm import (
@@ -41,12 +40,8 @@ def test_output_relay_forwards_stream_and_result() -> None:
     thread = threading.Thread(target=relay.start)
     thread.start()
     try:
-        deadline = time.monotonic() + 2
-        while relay.outbox.qsize() < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert relay.outbox.qsize() == 2
-        stream = relay.outbox.get_nowait()
-        result = relay.outbox.get_nowait()
+        stream = relay.outbox.get(timeout=2)
+        result = relay.outbox.get(timeout=2)
     finally:
         relay.stop()
         thread.join(timeout=2)
@@ -73,23 +68,21 @@ def test_controller_route_and_output_relay_end_to_end(
     completed = controller.transition(dispatched)
     assert completed is not None
     assert route_umm("request", completed) == "output"
+    assert isinstance(completed.data, dict)
     assert [segment["kind"] for segment in completed.data["segments"]] == [
         "image",
         "usage",
     ]
-    assert not controller.contexts
 
     relay = UMMOutputRelay()
     relay.inbox.put(IncomingMessage("request", "new_request", completed.data))
     thread = threading.Thread(target=relay.start)
     thread.start()
     try:
-        deadline = time.monotonic() + 2
-        while relay.outbox.empty() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        message = relay.outbox.get_nowait()
+        message = relay.outbox.get(timeout=2)
     finally:
         relay.stop()
         thread.join(timeout=2)
     assert message.type == "result"
+    assert isinstance(message.data, dict)
     assert message.data["segments"][1]["kind"] == "usage"

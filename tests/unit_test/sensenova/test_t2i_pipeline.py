@@ -676,7 +676,7 @@ def test_image_edit_api_accepts_one_reference_image():
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False)])
-def test_image_edit_api_parses_cache_flag(raw, expected):
+def test_image_edit_api_parses_cache_flag(raw: str, expected: bool) -> None:
     class CacheFlagClient:
         async def generate(self, request, request_id):
             assert request.extra_params["enable_cache_dit"] is expected
