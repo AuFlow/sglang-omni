@@ -8,9 +8,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from pydantic import JsonValue
 
+from sglang_omni.admission import QueueFullError
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateChunk, GenerateRequest
-from sglang_omni.pipeline.umm import UMMController
+from sglang_omni.pipeline.umm import UMMController, UMMRequestError
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.serve.openai_api import create_app
 
@@ -130,3 +131,36 @@ def test_images_endpoints_consume_real_umm_results(
         encoded_image
     ] * 2
     assert response.json()["usage"]["input_tokens"] == 3
+
+
+@pytest.mark.parametrize("editing", [False, True])
+@pytest.mark.parametrize("capacity_rejection", [False, True])
+def test_images_preserve_umm_rejection_status(
+    encoded_image: str, editing: bool, capacity_rejection: bool
+) -> None:
+    class RejectedCoordinator:
+        async def submit(self, request_id: str, request: OmniRequest) -> JsonValue:
+            if capacity_rejection:
+                raise QueueFullError()
+            else:
+                raise UMMRequestError("request exceeds the configured image budget")
+
+    application = create_app(
+        Client(RejectedCoordinator()),
+        architectures=["NEOChatModel"],
+        interleaved_output=True,
+    )
+    with TestClient(application) as client:
+        if editing:
+            response = client.post(
+                "/v1/images/edits",
+                data={"prompt": "edit", "size": "64x32"},
+                files={
+                    "image": ("input.png", base64.b64decode(encoded_image), "image/png")
+                },
+            )
+        else:
+            response = client.post(
+                "/v1/images/generations", json={"prompt": "draw", "size": "64x32"}
+            )
+    assert response.status_code == (503 if capacity_rejection else 400)

@@ -2,6 +2,7 @@
 """SenseNova phase, output, and Images API contracts on the real controller."""
 
 from dataclasses import replace
+from typing import Literal
 
 import pytest
 import torch
@@ -9,15 +10,23 @@ import torch
 from sglang_omni.client.client import Client
 from sglang_omni.client.image_media import InlineImage
 from sglang_omni.client.types import UMMGenerateChunk
+from sglang_omni.config.runtime import (
+    resolve_stage_factory_kwargs,
+    resolve_stage_typed_kwargs,
+)
 from sglang_omni.models.sensenova_u1.cancellation import (
     GenerationScope,
     generation_checkpoint,
 )
+from sglang_omni.models.sensenova_u1.umm import SenseNovaUMMAdapter
 from sglang_omni.models.sensenova_u1.umm_config import SenseNovaU1UMMPipelineConfig
 from sglang_omni.pipeline.umm import (
     UMM_DEADLINE_METADATA_KEY,
+    CloseReason,
+    UMMContext,
     UMMController,
     UMMRequestError,
+    create_umm_controller,
 )
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import RequestCancelledError
@@ -180,3 +189,108 @@ def test_expired_phase_stops_at_checkpoint() -> None:
     ):
         with pytest.raises(RequestCancelledError):
             generation_checkpoint()
+
+
+@pytest.mark.parametrize("closing", ["aborted", "expired", "shutdown"])
+def test_adapter_cleanup_survives_late_results(
+    controller: UMMController,
+    closing: Literal["aborted", "expired", "shutdown"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[CloseReason] = []
+    close_adapter = controller.adapter.close
+
+    def record_close(context: UMMContext, reason: CloseReason) -> None:
+        close_adapter(context, reason)
+        closed.append(reason)
+
+    monkeypatch.setattr(controller.adapter, "close", record_close)
+    phase = controller.transition(StagePayload("request", OmniRequest("prompt"), None))
+    assert phase is not None
+    if closing == "expired":
+        deadline = controller.contexts["request"].deadline
+        monkeypatch.setattr(controller, "clock", lambda: deadline)
+        controller.forget("request")
+    elif closing == "shutdown":
+        controller.forget_all()
+    else:
+        controller.abort("request")
+    with pytest.raises(RuntimeError, match="inactive request"):
+        controller.transition(phase)
+    controller.forget("request")
+    assert closed == [closing]
+    assert not controller.contexts
+    assert not controller.adapter.executions
+
+
+@pytest.mark.parametrize("reference", ["not base64", "", []])
+def test_invalid_edit_reference_never_reaches_generation(
+    controller: UMMController, reference: str | list[str]
+) -> None:
+    request = OmniRequest(
+        {"task": "image_edit", "prompt": "edit", "image_b64": reference}
+    )
+    with pytest.raises(UMMRequestError):
+        controller.transition(StagePayload("request", request, None))
+    assert not controller.contexts
+    assert controller.outbox.empty()
+
+
+def test_reference_pixels_and_input_bytes_are_admission_bounds(
+    controller: UMMController, encoded_image: str
+) -> None:
+    adapter = controller.adapter
+    assert isinstance(adapter, SenseNovaUMMAdapter)
+    adapter.limits = adapter.limits.model_copy(update={"max_reference_pixels": 1})
+    request = OmniRequest(
+        {"task": "image_edit", "prompt": "edit", "image_b64": encoded_image}
+    )
+    with pytest.raises(UMMRequestError, match="max_reference_pixels"):
+        controller.transition(StagePayload("pixels", request, None))
+    adapter.limits = adapter.limits.model_copy(update={"max_input_bytes": 1})
+    with pytest.raises(UMMRequestError, match="max_input_bytes"):
+        controller.transition(StagePayload("bytes", OmniRequest("prompt"), None))
+    assert not adapter.executions
+
+
+@pytest.mark.parametrize("field", ["sha256", "size_bytes", "url"])
+def test_inline_media_rejects_tampered_content(
+    encoded_image: str, field: Literal["sha256", "size_bytes", "url"]
+) -> None:
+    media = InlineImage.from_png(encoded_image)
+    changes = {
+        "sha256": "0" * 64,
+        "size_bytes": media.size_bytes + 1,
+        "url": "https://example.invalid/image.png",
+    }
+    media = media.model_copy(update={field: changes[field]})
+    with pytest.raises(ValueError):
+        media.encoded_image()
+
+
+def test_loaded_configuration_constructs_controller_and_dispatches() -> None:
+    configuration = SenseNovaU1UMMPipelineConfig(model_path="unused")
+    stage = configuration.stage_named("orchestrator")
+    arguments = {
+        **resolve_stage_factory_kwargs(stage, configuration),
+        **resolve_stage_typed_kwargs(stage),
+    }
+    controller = create_umm_controller("unused", **arguments)
+    phase = controller.transition(StagePayload("request", OmniRequest("prompt"), None))
+    assert phase is not None
+    assert phase.request.metadata[UMM_DEADLINE_METADATA_KEY] > 0
+    controller.abort("request")
+    assert not controller.adapter.executions
+
+
+@pytest.mark.parametrize("violation", ["outputs", "cancellation"])
+def test_config_rejects_insufficient_bounds_and_disabled_cancellation(
+    violation: Literal["outputs", "cancellation"]
+) -> None:
+    configuration = SenseNovaU1UMMPipelineConfig(model_path="unused")
+    if violation == "outputs":
+        configuration.stage_named("orchestrator").factory.max_outputs = 1
+    else:
+        configuration.stage_named("generate").factory.cooperative_cancellation = False
+    with pytest.raises(ValueError):
+        SenseNovaU1UMMPipelineConfig.model_validate(configuration.model_dump())

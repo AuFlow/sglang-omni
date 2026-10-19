@@ -264,3 +264,44 @@ TP/DP, Cache-DiT, supported offload, cancellation, deadlines, and failure
 recovery. CPU contract tests, GPU/NPU inference, performance measurements,
 and business acceptance are reported separately. Unexecuted combinations
 remain unvalidated.
+
+
+### Run the UMM Pipeline
+
+With the model dependencies installed and MODEL_PATH pointing to the checkpoint,
+launch the opt-in configuration:
+
+```bash
+python -m sglang_omni.cli serve \
+  --config examples/configs/sensenova_u1_umm.yaml \
+  --model-path "$MODEL_PATH" \
+  --generate.gpu 0 \
+  --port 8000
+```
+
+The Images generation and edit requests above use the same response contract.
+Generation settings remain under `generate.factory`; admission limits are under
+`orchestrator.factory.adapter_options.limits`. The controller also requires
+`max_dispatches`, `max_outputs`, `max_active`, `max_retained_bytes`, and
+`timeout_s` under `orchestrator.factory`. The retained-byte limit reserves a
+conservative inline PNG budget before generation, so a request can be rejected
+before its actual encoded image size is known.
+
+### Validation Status
+
+CPU tests exercise the real adapter and controller, output ordering and usage,
+input/output budgets, deadlines, cleanup after late results, media integrity,
+and configuration construction. HTTP tests cover both Images endpoints and
+preservation of 400/503 rejection statuses. Their local CPU run loads the real
+SGLang utility module without the GPU-dependent package initializer; this does
+not validate a complete installed service.
+
+The Gloo suite covers TP collectives and asymmetric cancellation followed by a
+successful request on the same process group. It does not validate NCCL/HCCL
+cancellation during model inference.
+
+GPU/NPU launch, baseline image comparison, batching throughput, TP/DP inference,
+Cache-DiT, offload, and business acceptance remain unexecuted for this UMM path.
+The existing pipeline's hardware results do not establish these properties for
+the new configuration. Compare against commit 706053fa0 before enabling it in
+production, using the conditions and coverage listed above.
