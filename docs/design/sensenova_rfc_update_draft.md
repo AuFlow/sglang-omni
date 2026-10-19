@@ -109,6 +109,6 @@ The current model-owned `generate` stage remains the supported path.
 ## Evidence
 
 - Branch: `wes/sensenova-umm-adapter`, merge `cd4b310fa`.
-- CPU/Gloo regression: 239 passed, 2 skipped (43 subtests).
+- CPU/Gloo regression: 239 passed, 5 skipped (43 subtests).
 - Not run in this environment: full SGLang platform tests, GPU/NPU inference,
   NCCL/HCCL cancellation, business acceptance.
