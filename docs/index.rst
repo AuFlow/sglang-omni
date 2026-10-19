@@ -99,7 +99,7 @@ Supported Models
      - Text + image understanding and generation
    * - SenseNova-U1.5-8B-MoT
      - Image generation
-     - Text-to-image through ``/v1/images/generations``; experimental Ascend NPU path
+     - T2I/I2I through the Images API on the shared UMM pipeline; experimental Ascend NPU path
 
 
 .. toctree::

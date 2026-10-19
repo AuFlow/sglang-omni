@@ -16,9 +16,9 @@ The shared response builder matches SenseNova commit
 - Missing model token statistics remain unavailable; output pixels are not tokens.
 - Repeated outputs for the same prompt do not multiply its input token count.
 
-The main-based branch supplies the response builder and image usage carrier.
-The SenseNova validation branch supplies the model producer and mounts both APIs.
-No SenseNova model implementation is imported into the main-based branch.
+The shared response builder and image usage carrier are proposed on main in
+#2723. The SenseNova branch supplies the model producer and mounts both APIs;
+on this branch the UMM usage segment also carries `image_usage` to the client.
 
 The previous Chat usage extensions, streaming usage options, and `/generate`
 cached-token mapping are withdrawn. Existing base token usage is unchanged.

@@ -48,7 +48,9 @@ at the reported sample rate on successfully completed requests, before speed
 conversion/encoding. Encoded bytes or missing sample rates are not guessed.
 `sglang_omni:generated_images_total` counts the final reported image list (or
 single image), not diffusion steps; it requires an Images-capable result
-builder. Aborted/failed requests do not add successful modality output.
+builder. For UMM results it counts image segments, and the usage segment's
+`stage_name` labels the stage. Aborted/failed requests do not add successful
+modality output.
 
 
 Install the optional dependency with `pip install -e '.[metrics]'` and pass

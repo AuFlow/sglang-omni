@@ -1,9 +1,10 @@
 # SenseNova-U1.5 Image Generation
 
-SGLang-Omni supports the native image-generation path of
-`SenseNova-U1.5-8B-MoT`, including text-to-image (T2I) and image-to-image (I2I)
-through the OpenAI-compatible Images API. It loads the checkpoint once in a
-single stage and returns RGB PNG images as base64 data.
+SGLang-Omni supports `SenseNova-U1.5-8B-MoT` through the shared UMM image
+generation pipeline, including text-to-image (T2I) and image-to-image (I2I)
+through the OpenAI-compatible Images API. It loads the checkpoint once in the
+`generate` stage, routes requests through the UMM orchestrator/output stages,
+and returns RGB PNG images as base64 data.
 
 The Ascend path includes NPU fused infer attention (FIA), NPU RMSNorm, fused
 SwiGLU, and denoise timestep embedding reuse when the installed runtime exposes
@@ -89,11 +90,12 @@ on different ranks could produce different collective sequences. A single T2I
 request can still use `n > 1`. Cache-DiT and CUDA layerwise offload can be used
 with TP. Only the leader publishes the generated result.
 
-Once the leader dispatches a TP request, every rank completes its forward even
-if the request is cancelled; the stage discards cancelled results. Shutdown
-drains dispatched requests before unloading Cache-DiT and destroying the TP
-process group. The worker supervisor can still force termination if its
-shutdown timeout expires before draining finishes.
+For the UMM pipeline, TP cancellation is cooperative at model checkpoints:
+ranks agree before leaving a sequence of collectives, and a cancelled batch
+member does not stop live members. Shutdown drains dispatched requests before
+unloading Cache-DiT and destroying the TP process group. The worker supervisor
+can still force termination if its shutdown timeout expires before draining
+finishes.
 
 For two replicas with two TP ranks each, use
 `examples/configs/sensenova_u1_dp2_tp2.yaml`. The flat
@@ -160,7 +162,7 @@ rejected.
 
 ## Edit an Image
 
-The same server exposes the native SenseNova image-to-image (I2I) path through
+The same server exposes the SenseNova image-to-image (I2I) path through
 the multipart Images API:
 
 ```bash
@@ -216,78 +218,93 @@ does not prove that model execution was batched.
   Dense Qwen3 tensor parallelism is supported; sequence parallelism is not.
 - BF16 is the supported initial dtype.
 - Dynamic batching defaults to off (`max_batch_size=1`).
-- Quantization, compact mode, and thinking/SRT KV transfer are not exposed by
-  the Omni stage. CUDA layerwise CPU offload is available through
+- Quantization, compact mode, and SRT KV transfer are not exposed by the Omni
+  stage. Thinking mode and interleaved text/image output are a later #2831
+  phase and remain unexposed. CUDA layerwise CPU offload is available through
   `generate.factory.dit_layerwise_offload`.
+- The UMM path uses fixed admission limits (`DEFAULT_UMM_ADMISSION_LIMITS`);
+  `max_outputs` defaults to 11 to cover up to 10 images plus the usage segment.
 - Ascend I2I basic functionality and memory behavior have been validated on
   real hardware. Kernel-hit profiling and broader image-quality and performance
   characterization remain pending.
 
-## Shared UMM Integration Contract
+## Shared UMM Serving Contract
 
-The opt-in UMM integration targets the same T2I/I2I workloads as the existing
-pipeline. It keeps the SenseNova model stage and its batching, TP/DP,
-Cache-DiT, and offload settings. Thinking and interleaved model generation
-remain outside this integration. This section specifies the integration
-contract; it does not claim hardware acceptance or upstream RFC approval.
+The default SenseNova pipeline is the shared UMM pipeline:
+`orchestrator -> generate -> output`. It keeps the SenseNova model stage and
+its batching, TP/DP, Cache-DiT, and offload settings. Thinking and interleaved
+model generation remain out of scope for this pipeline; they are tracked as a
+later #2831 phase and depend on the UMM progress-streaming contract.
 
-The controller dispatches one generation phase and accepts one image segment
-per output, in generation order. The phase returns the original request,
-including its continuation metadata. It owns the model and device caches;
-the adapter owns only request translation and retained request bookkeeping.
-The output stage shares the controller process, as UMMPipelineConfig requires.
+The controller dispatches one `generate` phase and accepts image segments in
+generation order, followed by one optional `usage` segment. The phase returns
+the original request, including its continuation metadata. It owns the model
+and device caches; the adapter owns only request translation and retained
+request bookkeeping. The output stage shares the controller process, as
+UMMPipelineConfig requires.
 
 Each image segment uses the shared inline-media fields: kind, MIME type, byte
-size, SHA-256 digest, and data URL. A completing UMMStep may carry optional
-completion_metadata, returned under metadata in the final result and counted
-against the retained-byte bound. The controller does not interpret its fields.
-SenseNova puts image_usage in this metadata; the adapter and SDK validate its
-Images input-token semantics. This is distinct from adapter
-usage(context), which reports retained memory bytes. The Images endpoints
-must preserve response format, output association, and usage when consuming
-UMM results. A final streamed result carries usage even when segment data was
-already delivered.
+size, SHA-256 digest, and data URL. The usage segment has the shape:
 
-All five controller bounds are required. Output count and input size are
-checked before generation; image dimensions and step count also have explicit
-model admission limits. Controller retained-byte accounting includes inline
-outputs and completion metadata. Reference-image bounds cover both original
-and resized pixels, using the same size calculation as preprocessing. They
-respect default resize settings and do_resize=False. These bounds do not
-represent total accelerator memory.
+```json
+{
+  "type": "segment",
+  "kind": "usage",
+  "data": {
+    "image_usage": {
+      "input_tokens": 15,
+      "total_tokens": 15,
+      "input_tokens_details": {"text_tokens": 15, "image_tokens": 4096}
+    },
+    "stage_name": "generate"
+  }
+}
+```
+
+The Images endpoints extract `image_usage` from this segment. `/generate`
+clients see the usage segment in the segment list. For a streamed `/generate`
+request the controller strips segment data from the final result, so a
+streaming client must read usage from the streamed usage segment; the Images
+endpoints are non-streaming and always receive it in the final result. This is
+distinct from `adapter.usage(context)`, which reports retained memory bytes.
+
+All five controller bounds are required. `max_outputs` must cover
+`max_images + 1` for the usage segment (the default is 11 for 10 images).
+Output count and input size are checked before generation; image dimensions
+and step count also have explicit model admission limits. The admission limits
+are fixed model constants (`DEFAULT_UMM_ADMISSION_LIMITS`), because the UMM
+controller factory does not accept per-model adapter options. Reference-image
+bounds cover both original and resized pixels, using the same size calculation
+as preprocessing. They respect default resize settings and `do_resize=False`.
+These bounds do not represent total accelerator memory.
 
 Cancellation is cooperative at model checkpoints. TP ranks decide together
-before leaving a sequence of collectives. One cancelled member of a fused
-batch must not fail live members; their shared computation can continue until
-the batch has no live requests. Cancellation and failure release per-request
-state, while model weights remain available for later requests. Invalid input
-must be rejected before TP fan-out.
+before leaving a sequence of collectives. One cancelled member of a fused batch
+must not fail live members; their shared computation can continue until the
+batch has no live requests. Cancellation and failure release per-request state,
+while model weights remain available for later requests. Invalid input must be
+rejected before TP fan-out.
 
-Acceptance compares the opt-in UMM path with commit 706053fa0 using the same
+Acceptance compares this UMM path with commit `706053fa0` using the same
 checkpoint, seeds, hardware, parameters, concurrency, and warmup. Required
-coverage includes T2I/I2I, ordered multi-output T2I, compatible request batching,
-TP/DP, Cache-DiT, supported offload, cancellation, deadlines, and failure
-recovery. CPU contract tests, GPU/NPU inference, performance measurements,
-and business acceptance are reported separately. Unexecuted combinations
-remain unvalidated.
-
+coverage includes T2I/I2I, ordered multi-output T2I, compatible request
+batching, TP/DP, Cache-DiT, supported offload, cancellation, deadlines, and
+failure recovery. CPU contract tests, GPU/NPU inference, performance
+measurements, and business acceptance are reported separately. Unexecuted
+combinations remain unvalidated.
 
 ### Run the UMM Pipeline
 
-With the model dependencies installed and MODEL_PATH pointing to the checkpoint,
-launch the opt-in configuration:
+With the model dependencies installed and `MODEL_PATH` pointing to the
+checkpoint, launch the default configuration:
 
 ```bash
-python -m sglang_omni.cli serve \
-  --config examples/configs/sensenova_u1_umm.yaml \
-  --model-path "$MODEL_PATH" \
-  --generate.gpu 0 \
-  --port 8000
+python -m sglang_omni.cli serve   --config examples/configs/sensenova_u1_umm.yaml   --model-path "$MODEL_PATH"   --generate.gpu 0   --port 8000
 ```
 
 The Images generation and edit requests above use the same response contract.
-Generation settings remain under `generate.factory`; admission limits are under
-`orchestrator.factory.adapter_options.limits`. The controller also requires
+Generation settings remain under `generate.factory`; the fixed admission limits
+are checked before generation. The controller still requires
 `max_dispatches`, `max_outputs`, `max_active`, `max_retained_bytes`, and
 `timeout_s` under `orchestrator.factory`. The retained-byte limit reserves a
 conservative inline PNG budget before generation, so a request can be rejected
@@ -297,7 +314,9 @@ before its actual encoded image size is known.
 
 CPU tests exercise the real adapter and controller, output ordering and usage,
 input/output budgets, deadlines, cleanup after late results, media integrity,
-and configuration construction. HTTP tests cover both Images endpoints and
+and configuration construction. The current CPU/Gloo regression is 236 passed
+and 2 skipped; it includes T2I, multi-output, UMM routing/output, Images usage,
+metrics, TP configuration and cancellation, Cache-DiT, sampling, and usage. HTTP tests cover both Images endpoints and
 preservation of 400/503 rejection statuses. Their local CPU run loads the real
 SGLang utility module without the GPU-dependent package initializer; this does
 not validate a complete installed service.
@@ -309,5 +328,5 @@ cancellation during model inference.
 GPU/NPU launch, baseline image comparison, batching throughput, TP/DP inference,
 Cache-DiT, offload, and business acceptance remain unexecuted for this UMM path.
 The existing pipeline's hardware results do not establish these properties for
-the new configuration. Compare against commit 706053fa0 before enabling it in
-production, using the conditions and coverage listed above.
+the new default configuration. Compare against commit `706053fa0` before
+production use, using the conditions and coverage listed above.
