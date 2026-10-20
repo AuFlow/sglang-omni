@@ -3,6 +3,8 @@
 
 import threading
 
+from sglang_omni.client.client import umm_segment_chunk
+from sglang_omni.client.types import GenerateChunk, UMMSegment
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.pipeline.umm import (
     CONTINUATION_METADATA_KEY,
@@ -50,6 +52,12 @@ def test_output_relay_forwards_stream_and_result() -> None:
     assert stream.metadata == {"modality": "image"}
     assert result.type == "result"
     assert result.data == {"type": "umm_result"}
+
+
+def test_streamed_usage_segment_uses_the_payload_stage() -> None:
+    segment = UMMSegment("execution", 0, "usage", {"stage_name": "generate"})
+    chunk = umm_segment_chunk(GenerateChunk(request_id="request"), segment.to_dict())
+    assert chunk.stage_name == "generate"
 
 
 def test_controller_route_and_output_relay_end_to_end(

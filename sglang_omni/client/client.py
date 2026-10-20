@@ -1092,12 +1092,21 @@ def extract_inputs(request: GenerateRequest) -> object:
 def umm_segment_chunk(chunk: GenerateChunk, data: dict[str, object]) -> GenerateChunk:
     """Carry one streamed segment of an interleaved (UMM) request."""
     segment = UMMSegment.from_dict(data)
+    stage_name = chunk.stage_name
+    if segment.kind == "usage" and isinstance(segment.data, dict):
+        raw_stage_name = segment.data.get("stage_name")
+        if isinstance(raw_stage_name, str):
+            stage_name = raw_stage_name
+        else:
+            pass
+    else:
+        pass
     return UMMGenerateChunk(
         request_id=chunk.request_id,
         index=segment.segment_index,
         text=segment.data if segment.kind == "text" else "",
         stage_id=chunk.stage_id,
-        stage_name=chunk.stage_name,
+        stage_name=stage_name,
         modality=segment.kind,
         segment=segment,
     )
