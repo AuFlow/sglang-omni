@@ -90,6 +90,37 @@ Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
   `timeout_s=1800`, a 4-step request returned HTTP 200.
 - TP/DP: not run, because the host exposes a single RTX 4090.
 
+## Boundary, concurrency, long-step, failure, stream
+
+- T2I n=10: HTTP 200, 10 valid 512x512 PNGs, `image_count=10`.
+- T2I 768x512: HTTP 200, `width=768`, `height=512`.
+- I2I n=2 with one reference: HTTP 200, 2 images, `image_count=2`.
+- I2I with three references: HTTP 500 CUDA OOM for both n=1 and n=2 on the 24 GiB
+  RTX 4090. One reference n=2 fits; multi-reference is not memory-safe here.
+- Cache-DiT sequential: two 8-step requests both HTTP 200; outputs differ, so
+  the second request did not reuse the first response.
+- Cache-DiT + batching: two concurrent 8-step requests logged
+  `T2I batch: size=2` and both returned HTTP 200.
+- Four concurrent 2-step requests: all HTTP 200, batched in pairs.
+- 50-step T2I: HTTP 200; completed within the 1800 s deadline.
+- Failure recovery: invalid size returned HTTP 400, and the next valid request
+  returned HTTP 200.
+- `/generate` streaming: HTTP 200 with two segments (image and usage), a
+  complete event, and `[DONE]`; the usage segment carried `stage_name=generate`.
+  The request took several minutes for the 2-step stage params, so stage-param
+  passthrough is not confirmed and needs follow-up.
+
+Metrics after these runs:
+
+```text
+sglang_omni:generated_images_total{stage="generate"} 23
+sglang_omni:generated_images_total{stage="unknown"}   1
+```
+
+The `unknown` sample is the streamed `/generate` result: its final segments have
+their data stripped and the client cannot recover the usage segment's stage
+label from the final result. This is a metrics labeling gap for streamed UMM.
+
 ## Baseline quality and offload lifecycle
 
 The pre-UMM baseline was launched from a detached worktree at `706053fa0`
@@ -129,4 +160,6 @@ No residual GPU memory was observed after shutdown.
 - NPU FIA/RMSNorm/SwiGLU/fused RoPE and I2I: no Ascend NPU.
 - TP/DP real multi-GPU inference: the host has one GPU.
 - NPU execution: no Ascend NPU.
+- Multi-reference I2I on 24 GiB: currently OOM.
+- `/generate` streamed UMM metrics stage labeling and stage-param passthrough.
 - Baseline comparison at larger scale and other prompts/seeds.
