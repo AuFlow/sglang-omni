@@ -428,6 +428,22 @@ def create_app(
     return app
 
 
+def parse_image_size(value: str) -> tuple[int, int]:
+    """Parse the Images API WxH size string with one stable error."""
+    try:
+        width_text, height_text = value.split("x")
+        width, height = int(width_text), int(height_text)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError("size must be WxH") from error
+    else:
+        pass
+    if width <= 0 or height <= 0:
+        raise ValueError("size must be WxH")
+    else:
+        pass
+    return width, height
+
+
 def register_images(
     app: FastAPI,
     decode_mode: Literal["normal", "decoder-turbo"],
@@ -520,7 +536,11 @@ def register_images(
                 pass
             size = supplied.get("size")
             if size is not None:
-                width, height = (int(value) for value in size.split("x"))
+                if not isinstance(size, str):
+                    raise ValueError("size must be WxH")
+                else:
+                    pass
+                width, height = parse_image_size(size)
                 if request.width is not None and (width, height) != (
                     request.width,
                     request.height,
@@ -1519,10 +1539,10 @@ def register_image_generations(app: FastAPI) -> None:
         else:
             pass
         try:
-            width_str, height_str = req.size.split("x")
+            width, height = parse_image_size(req.size)
             params = {
-                "width": int(width_str),
-                "height": int(height_str),
+                "width": width,
+                "height": height,
                 "num_inference_steps": req.num_inference_steps,
                 "guidance_scale": req.guidance_scale,
                 "seed": req.seed,
@@ -1651,8 +1671,8 @@ def register_image_edits(app: FastAPI) -> None:
             else:
                 pass
             if size is not None:
-                width_str, height_str = size.split("x")
-                params.update(width=int(width_str), height=int(height_str))
+                width, height = parse_image_size(size)
+                params.update(width=width, height=height)
             else:
                 pass
             for name, value in (

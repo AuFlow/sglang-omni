@@ -18,7 +18,11 @@ from sglang_omni.config import FactoryArgs, ProcessConfig
 from sglang_omni.config.manager import resolve_config_cls_for_model_path
 from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.models.sensenova_u1.config import SenseNovaU1PipelineConfig
-from sglang_omni.models.sensenova_u1.generation import generate_image, generate_images
+from sglang_omni.models.sensenova_u1.generation import (
+    generate_image,
+    generate_images,
+    text_to_image_options,
+)
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import NEOChatModel
 from sglang_omni.models.sensenova_u1.stages import (
     image_generation_batch_key,
@@ -790,6 +794,13 @@ def test_image_edit_api_rejects_unsupported_or_invalid_inputs():
         data={"prompt": "edit this", "size": "31x32"},
     )
     assert invalid_size.status_code == 400
+    malformed_size = client.post(
+        "/v1/images/edits",
+        files={"image": image_file},
+        data={"prompt": "edit this", "size": "bad"},
+    )
+    assert malformed_size.status_code == 400
+    assert malformed_size.json()["detail"] == "size must be WxH"
     for n in (0, -1, 11):
         invalid_n = client.post(
             "/v1/images/edits",
@@ -878,3 +889,30 @@ def test_client_preserves_multiple_generated_images():
     )
     assert chunk.images_b64 == ["a", "b"]
     assert chunk.to_dict()["images_b64"] == ["a", "b"]
+
+
+def test_generate_stage_params_layer_onto_t2i_options():
+    payload = StagePayload(
+        "request",
+        OmniRequest(
+            "A blue cat",
+            {
+                "stage_params": {
+                    "generate": {
+                        "width": 512,
+                        "height": 384,
+                        "num_inference_steps": 2,
+                        "guidance_scale": 3.0,
+                        "seed": 7,
+                        "n": 1,
+                    }
+                }
+            },
+        ),
+        None,
+    )
+    options = text_to_image_options(payload)
+    assert (options.width, options.height) == (512, 384)
+    assert options.num_inference_steps == 2
+    assert options.guidance_scale == 3.0
+    assert options.seed == 7
