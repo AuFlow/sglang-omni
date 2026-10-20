@@ -294,25 +294,34 @@ def generate_image_edit(
         img_cfg_scale=options.img_cfg_scale,
         is_edit=True,
     )
-    with torch.inference_mode():
-        images = model.it2i_generate(
-            tokenizer,
-            prompt,
-            references,
-            usage=token_usage,
-            batch_size=1,
-            seed=options.seed,
-            image_size=(width, height),
-            cfg_scale=options.guidance_scale,
-            img_cfg_scale=options.img_cfg_scale,
-            cfg_norm="none",
-            timestep_shift=GENERATION_TIMESTEP_SHIFT,
-            enable_timestep_shift=True,
-            cfg_interval=(0.0, 1.0),
-            num_steps=options.num_inference_steps,
-            t_eps=GENERATION_TIME_EPSILON,
-            think_mode=False,
-        )
+    try:
+        with torch.inference_mode():
+            images = model.it2i_generate(
+                tokenizer,
+                prompt,
+                references,
+                usage=token_usage,
+                batch_size=1,
+                seed=options.seed,
+                image_size=(width, height),
+                cfg_scale=options.guidance_scale,
+                img_cfg_scale=options.img_cfg_scale,
+                cfg_norm="none",
+                timestep_shift=GENERATION_TIMESTEP_SHIFT,
+                enable_timestep_shift=True,
+                cfg_interval=(0.0, 1.0),
+                num_steps=options.num_inference_steps,
+                t_eps=GENERATION_TIME_EPSILON,
+                think_mode=False,
+            )
+    except torch.OutOfMemoryError as error:
+        torch.cuda.empty_cache()
+        raise ValueError(
+            f"SenseNova-U1 I2I with {len(references)} reference images exceeds GPU memory; "
+            "reduce references or lower generate.factory.dit_layerwise_resident_layers"
+        ) from error
+    else:
+        pass
     result = encode_image(payload, images, width, height)
     result.data["image_usage"] = build_image_usage(
         prompt, tokenizer, token_usage.get("image_tokens", 0)
