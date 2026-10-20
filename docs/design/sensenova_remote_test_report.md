@@ -95,8 +95,10 @@ Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
 - T2I n=10: HTTP 200, 10 valid 512x512 PNGs, `image_count=10`.
 - T2I 768x512: HTTP 200, `width=768`, `height=512`.
 - I2I n=2 with one reference: HTTP 200, 2 images, `image_count=2`.
-- I2I with three references: HTTP 500 CUDA OOM for both n=1 and n=2 on the 24 GiB
-  RTX 4090. One reference n=2 fits; multi-reference is not memory-safe here.
+- I2I with three references on the 24 GiB RTX 4090: before the fix this raised
+  CUDA OOM (HTTP 500); after the fix it returns HTTP 400 with an explicit
+  GPU-memory message. One reference n=2 fits; three references remain
+  unsupported on this GPU rather than crashing.
 - I2I with one reference and omitted size: HTTP 200, 2048x2048,
   `image_tokens=4096`; the default size path works but is memory-heavy.
 - Cache-DiT sequential: two 8-step requests both HTTP 200; outputs differ, so
@@ -112,16 +114,20 @@ Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
   The request took several minutes for the 2-step stage params, so stage-param
   passthrough is not confirmed and needs follow-up.
 
-Metrics after these runs:
+Before the stream-label fix, the cumulative sample showed
+`stage="generate" 24` plus one `stage="unknown"` image from streamed
+`/generate`. The final streamed segments have their data stripped, so the
+client could not recover the usage segment's stage label.
+
+After carrying the usage segment's `stage_name` into the streamed chunk and
+reusing it in request metrics, a fresh server and one `/generate` request
+reported:
 
 ```text
-sglang_omni:generated_images_total{stage="generate"} 24
-sglang_omni:generated_images_total{stage="unknown"}   1
+sglang_omni:generated_images_total{model_name=...,stage="generate"} 1.0
 ```
 
-The `unknown` sample is the streamed `/generate` result: its final segments have
-their data stripped and the client cannot recover the usage segment's stage
-label from the final result. This is a metrics labeling gap for streamed UMM.
+No `stage="unknown"` sample was present.
 
 ## Baseline quality and offload lifecycle
 
