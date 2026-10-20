@@ -14,7 +14,9 @@ from torch import nn
 from sglang_omni.models.sensenova_u1.cancellation import SenseNovaCancelledError
 from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
-from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
+from sglang_omni.models.sensenova_u1.tensor_parallel_scheduler import (
+    TensorParallelScheduler,
+)
 
 SUPPORTED_TP_SIZES: tuple[int, ...] = (1, 2, 4, 8)
 TP_INITIALIZATION_TIMEOUT_MINUTES: int = 10

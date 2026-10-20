@@ -6,7 +6,9 @@ import threading
 import pytest
 
 from sglang_omni.scheduling.message import IncomingMessage
-from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
+from sglang_omni.models.sensenova_u1.tensor_parallel_scheduler import (
+    TensorParallelScheduler,
+)
 
 
 def request(request_id):
