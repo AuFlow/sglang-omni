@@ -97,6 +97,8 @@ Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
 - I2I n=2 with one reference: HTTP 200, 2 images, `image_count=2`.
 - I2I with three references: HTTP 500 CUDA OOM for both n=1 and n=2 on the 24 GiB
   RTX 4090. One reference n=2 fits; multi-reference is not memory-safe here.
+- I2I with one reference and omitted size: HTTP 200, 2048x2048,
+  `image_tokens=4096`; the default size path works but is memory-heavy.
 - Cache-DiT sequential: two 8-step requests both HTTP 200; outputs differ, so
   the second request did not reuse the first response.
 - Cache-DiT + batching: two concurrent 8-step requests logged
@@ -113,7 +115,7 @@ Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
 Metrics after these runs:
 
 ```text
-sglang_omni:generated_images_total{stage="generate"} 23
+sglang_omni:generated_images_total{stage="generate"} 24
 sglang_omni:generated_images_total{stage="unknown"}   1
 ```
 
