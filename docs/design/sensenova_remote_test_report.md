@@ -107,12 +107,12 @@ Server settings: `max_batch_size=2`, `max_batch_wait_ms=500`,
   `T2I batch: size=2` and both returned HTTP 200.
 - Four concurrent 2-step requests: all HTTP 200, batched in pairs.
 - 50-step T2I: HTTP 200; completed within the 1800 s deadline.
-- Failure recovery: invalid size returned HTTP 400, and the next valid request
-  returned HTTP 200.
+- Failure recovery: invalid size returned HTTP 400 with
+  `{"detail":"size must be WxH"}`, and the next valid request returned HTTP 200.
 - `/generate` streaming: HTTP 200 with two segments (image and usage), a
   complete event, and `[DONE]`; the usage segment carried `stage_name=generate`.
-  The request took several minutes for the 2-step stage params, so stage-param
-  passthrough is not confirmed and needs follow-up.
+  After layering `stage_params.generate` into the image options, a 2-step
+  request completed with the smaller 2-step output, confirming passthrough.
 
 Before the stream-label fix, the cumulative sample showed
 `stage="generate" 24` plus one `stage="unknown"` image from streamed
@@ -169,5 +169,4 @@ No residual GPU memory was observed after shutdown.
 - TP/DP real multi-GPU inference: the host has one GPU.
 - NPU execution: no Ascend NPU.
 - Multi-reference I2I on 24 GiB: currently OOM.
-- `/generate` streamed UMM metrics stage labeling and stage-param passthrough.
 - Baseline comparison at larger scale and other prompts/seeds.
