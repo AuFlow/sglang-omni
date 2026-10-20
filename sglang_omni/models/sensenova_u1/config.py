@@ -54,6 +54,9 @@ class SenseNovaGenerationStageConfig(StageConfig):
 
 class SenseNovaU1PipelineConfig(UMMPipelineConfig):
     architecture: ClassVar[str] = "NEOChatModel"
+    images_api: ClassVar[str] = (
+        "sglang_omni.models.sensenova_u1.images_api.register_images_api"
+    )
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "generate": SenseNovaGenerationStageConfig,
     }

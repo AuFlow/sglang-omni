@@ -14,6 +14,7 @@ import sglang_omni.serve.openai_api as api_module
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateChunk, GenerateRequest
 from sglang_omni.scheduling.metrics_snapshot import MetricsAdminResponse
+from sglang_omni.models.sensenova_u1.images_api import register_images_api
 from sglang_omni.serve.openai_api import create_app
 from sglang_omni.serve.request_metrics import RequestMetrics
 
@@ -159,7 +160,10 @@ def test_images_finish_iteration_before_recording_success(
 
     backend = ImageClient()
     app = create_app(
-        backend, model_name="test", architectures=["NEOChatModel"], enable_metrics=True
+        backend,
+        model_name="test",
+        image_api_registrar=register_images_api,
+        enable_metrics=True,
     )
     with TestClient(app) as client:
         if editing:

@@ -13,6 +13,7 @@ from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateChunk, GenerateRequest
 from sglang_omni.pipeline.umm import UMMController, UMMRequestError
 from sglang_omni.proto.request import OmniRequest, StagePayload
+from sglang_omni.models.sensenova_u1.images_api import register_images_api
 from sglang_omni.serve.openai_api import create_app
 
 pytest_plugins = ["tests.unit_test.fixtures.sensenova_umm"]
@@ -60,7 +61,7 @@ def test_images_usage_and_complete_result_consumption(
 
     backend = ImageClient()
     with TestClient(
-        create_app(backend, model_name="test", architectures=["NEOChatModel"])
+        create_app(backend, model_name="test", image_api_registrar=register_images_api)
     ) as client:
         if editing:
             response = client.post(
@@ -113,7 +114,7 @@ def test_images_endpoints_consume_real_umm_results(
 
     application = create_app(
         Client(GenerationCoordinator()),
-        architectures=["NEOChatModel"],
+        image_api_registrar=register_images_api,
         interleaved_output=True,
     )
     with TestClient(application) as client:
@@ -155,7 +156,7 @@ def test_images_preserve_umm_rejection_status(
 
     application = create_app(
         Client(RejectedCoordinator()),
-        architectures=["NEOChatModel"],
+        image_api_registrar=register_images_api,
         interleaved_output=True,
     )
     with TestClient(application) as client:

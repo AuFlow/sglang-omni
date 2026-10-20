@@ -18,6 +18,7 @@ from sglang_omni.config import FactoryArgs, ProcessConfig
 from sglang_omni.config.manager import resolve_config_cls_for_model_path
 from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.models.sensenova_u1.config import SenseNovaU1PipelineConfig
+from sglang_omni.models.sensenova_u1.images_api import register_images_api
 from sglang_omni.models.sensenova_u1.generation import (
     generate_image,
     generate_images,
@@ -139,7 +140,9 @@ def test_t2i_api_returns_all_outputs_in_one_request():
 
     backend = MultiClient()
     client = TestClient(
-        create_app(backend, model_name="sensenova", architectures=["NEOChatModel"])
+        create_app(
+            backend, model_name="sensenova", image_api_registrar=register_images_api
+        )
     )
     response = client.post("/v1/images/generations", json={"prompt": "a cat", "n": 3})
     assert response.status_code == 200
@@ -619,7 +622,7 @@ class MultipleOutputImageEditClient:
 
 def test_image_api_exposes_image_only_for_sensenova():
     app = create_app(
-        ImageClient(), model_name="sensenova", architectures=["NEOChatModel"]
+        ImageClient(), model_name="sensenova", image_api_registrar=register_images_api
     )
     client = TestClient(app)
     response = client.post(
@@ -653,7 +656,9 @@ def test_image_api_exposes_image_only_for_sensenova():
 
 def test_image_edit_api_accepts_one_reference_image():
     app = create_app(
-        ImageEditClient(), model_name="sensenova", architectures=["NEOChatModel"]
+        ImageEditClient(),
+        model_name="sensenova",
+        image_api_registrar=register_images_api,
     )
     client = TestClient(app)
     reference = io.BytesIO()
@@ -697,7 +702,7 @@ def test_image_edit_api_parses_cache_flag(raw: str, expected: bool) -> None:
     app = create_app(
         CacheFlagClient(),
         model_name="sensenova",
-        architectures=["NEOChatModel"],
+        image_api_registrar=register_images_api,
     )
     client = TestClient(app)
     reference = io.BytesIO()
@@ -716,7 +721,7 @@ def test_image_edit_api_uses_sglang_defaults_when_omitted():
     app = create_app(
         DefaultImageEditClient(),
         model_name="sensenova",
-        architectures=["NEOChatModel"],
+        image_api_registrar=register_images_api,
     )
     client = TestClient(app)
     reference = io.BytesIO()
@@ -735,7 +740,7 @@ def test_image_edit_api_accepts_multiple_reference_images():
     app = create_app(
         DefaultImageEditClient(expected_images=2),
         model_name="sensenova",
-        architectures=["NEOChatModel"],
+        image_api_registrar=register_images_api,
     )
     client = TestClient(app)
     reference = io.BytesIO()
@@ -756,7 +761,7 @@ def test_image_edit_api_expands_n_with_sequential_seeds():
     app = create_app(
         image_client,
         model_name="sensenova",
-        architectures=["NEOChatModel"],
+        image_api_registrar=register_images_api,
     )
     client = TestClient(app)
     reference = io.BytesIO()
@@ -775,7 +780,9 @@ def test_image_edit_api_expands_n_with_sequential_seeds():
 
 def test_image_edit_api_rejects_unsupported_or_invalid_inputs():
     app = create_app(
-        ImageEditClient(), model_name="sensenova", architectures=["NEOChatModel"]
+        ImageEditClient(),
+        model_name="sensenova",
+        image_api_registrar=register_images_api,
     )
     client = TestClient(app)
     reference = io.BytesIO()
