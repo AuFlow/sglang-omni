@@ -50,6 +50,37 @@ class TestCacheDitParameters(unittest.TestCase):
                     True,
                 )
 
+    def test_explicit_disable_overrides_enabled_worker_default(self) -> None:
+        for parameters in ([], {"unknown": True}, {"Fn_compute_blocks": -1}):
+            with self.subTest(parameters=parameters):
+                self.assertEqual(
+                    resolve_cache_dit_params(
+                        {"enable_cache_dit": False, "cache_dit_params": parameters},
+                        True,
+                    ),
+                    (False, None),
+                )
+
+    def test_enabled_sampling_and_worker_reject_invalid_numeric_parameters(
+        self,
+    ) -> None:
+        for parameters in (
+            {"Fn_compute_blocks": True},
+            {"Bn_compute_blocks": 1.5},
+            {"residual_diff_threshold": float("nan")},
+            {"residual_diff_threshold": float("inf")},
+            {"max_warmup_steps": -1},
+        ):
+            request_parameters = {
+                "enable_cache_dit": True,
+                "cache_dit_params": parameters,
+            }
+            with self.subTest(parameters=parameters):
+                with self.assertRaises(ValueError):
+                    SenseNovaU1Sampling.from_params(request_parameters)
+                with self.assertRaises(ValueError):
+                    resolve_cache_dit_params(request_parameters, False)
+
     def test_deferred_parameters_survive_sampling_and_are_hashable(self) -> None:
         raw = {"unknown": {"nested": [1, 2]}}
         options = SenseNovaU1Sampling.from_params({"cache_dit_params": raw})

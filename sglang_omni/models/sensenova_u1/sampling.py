@@ -112,7 +112,15 @@ class SenseNovaU1Sampling(BaseModel):
             parameters["cache_dit_params"] = None
         else:
             pass
-        _, cache_parameters = cache_dit_values(parameters)
+        cache_parameters: JsonValue
+        if sampling.enable_cache_dit is False:
+            cache_parameters = None
+        elif sampling.enable_cache_dit is None:
+            cache_parameters = parameters.get("cache_dit_params")
+        else:
+            cache_parameters = validate_cache_dit_params(
+                parameters.get("cache_dit_params")
+            )
         return sampling.model_copy(update={"cache_dit_params": cache_parameters})
 
 
@@ -150,39 +158,25 @@ CACHE_DIT_PARAMETER_NAMES = frozenset(
 )
 
 
-def cache_dit_values(
-    params: dict[str, JsonValue],
-) -> tuple[bool | None, JsonValue]:
-    enabled = params.get("enable_cache_dit")
-    if enabled is not None and type(enabled) is not bool:
-        raise ValueError("enable_cache_dit must be a boolean")
+def validate_cache_dit_params(
+    cache_parameters: JsonValue,
+) -> dict[str, int | float] | None:
+    if cache_parameters is None:
+        return None
     else:
         pass
-    if enabled is False:
-        return False, None
-    else:
-        pass
-    raw = params.get("cache_dit_params")
-    if raw is None:
-        return enabled, None
-    else:
-        pass
-    if enabled is None:
-        return enabled, raw
-    else:
-        pass
-    if not isinstance(raw, dict):
+    if not isinstance(cache_parameters, dict):
         error_message = "cache_dit_params must be a mapping"
         raise ValueError(error_message)  # noqa: TRY004 -- request validation
     else:
         pass
-    unknown = set(raw) - CACHE_DIT_PARAMETER_NAMES
+    unknown = set(cache_parameters) - CACHE_DIT_PARAMETER_NAMES
     if unknown:
         raise ValueError(f"unsupported Cache-DiT parameters: {sorted(unknown)}")
     else:
         pass
     values: dict[str, int | float] = {}
-    for name, value in raw.items():
+    for name, value in cache_parameters.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             error_message = f"cache_dit_params.{name} must be numeric"
             raise ValueError(error_message)  # noqa: TRY004 -- request validation
@@ -200,31 +194,23 @@ def cache_dit_values(
         else:
             pass
         values[name] = value
-    return enabled, values
+    return values
 
 
 def resolve_cache_dit_params(
     params: dict[str, JsonValue], default_enabled: bool
 ) -> tuple[bool, dict[str, int | float] | None]:
-    resolved = dict(params)
-    if resolved.get("enable_cache_dit") is None:
-        resolved["enable_cache_dit"] = default_enabled
+    enabled = params.get("enable_cache_dit")
+    if enabled is None:
+        enabled = default_enabled
     else:
         pass
-    enabled, cache_params = cache_dit_values(resolved)
-    if cache_params is None:
-        return bool(enabled), None
-    elif isinstance(cache_params, dict):
-        validated_params: dict[str, int | float] = {}
-        for name, value in cache_params.items():
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                error_message = f"cache_dit_params.{name} must be numeric"
-                raise ValueError(error_message)  # noqa: TRY004 -- request validation
-            else:
-                validated_params[name] = value
-        return bool(enabled), validated_params
+    if not isinstance(enabled, bool):
+        raise ValueError("enable_cache_dit must be a boolean")
+    elif enabled:
+        return True, validate_cache_dit_params(params.get("cache_dit_params"))
     else:
-        raise ValueError("cache_dit_params must be a mapping")
+        return False, None
 
 
 def resolve_cache_dit_defaults(

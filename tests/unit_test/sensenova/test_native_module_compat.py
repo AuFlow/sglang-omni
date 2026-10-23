@@ -196,19 +196,51 @@ def test_seeded_generation_preserves_global_rng(
 
 
 @pytest.mark.parametrize(
-    "template_name",
-    ["Hermes-2", "internlm2-chat", "phi3-chat", "internvl2_5", "neo1_0"],
+    "template_name,expected_prompt",
+    [
+        (
+            "Hermes-2",
+            "<|im_start|>system\nsystem<|im_end|>"
+            "<|im_start|>user\nrequest-specific prompt<|im_end|>"
+            "<|im_start|>assistant\n",
+        ),
+        (
+            "internlm2-chat",
+            "<|im_start|>system\nsystem<|im_end|>"
+            "<|im_start|>user\nrequest-specific prompt<|im_end|>"
+            "<|im_start|>assistant\n",
+        ),
+        (
+            "phi3-chat",
+            "<|system|>\nsystem<|end|>"
+            "<|user|>\nrequest-specific prompt<|end|>"
+            "<|assistant|>\n",
+        ),
+        (
+            "internvl2_5",
+            "<|im_start|>system\nsystem<|im_end|>\n"
+            "<|im_start|>user\nrequest-specific prompt<|im_end|>\n"
+            "<|im_start|>assistant\n",
+        ),
+        (
+            "neo1_0",
+            "<|im_start|>system\nsystem<|im_end|>\n"
+            "<|im_start|>user\nrequest-specific prompt<|im_end|>\n"
+            "<|im_start|>assistant\n",
+        ),
+    ],
 )
 def test_conversation_templates_keep_request_histories_independent(
-    native_modules: NativeModuleLoader, template_name: str
+    native_modules: NativeModuleLoader, template_name: str, expected_prompt: str
 ) -> None:
     conversations = native_modules("conversation")
     first = conversations.get_conv_template(template_name)
     second = conversations.get_conv_template(template_name)
     original_prompt = second.get_prompt()
+    first.set_system_message("system")
     first.append_message(first.roles[0], "request-specific prompt")
     first.append_message(first.roles[1], None)
-    assert "request-specific prompt" in first.get_prompt()
+    assert first.get_prompt() == expected_prompt
     assert second.get_prompt() == original_prompt
     assert (
         conversations.get_conv_template(template_name).get_prompt() == original_prompt
@@ -223,17 +255,17 @@ def test_conversation_preserves_image_message_and_registration_contract(
     template.name = "custom-review-template"
     template.append_message(template.roles[0], ("image question", [], "Default"))
     conversations.register_conv_template(template)
-    assert (
-        "image question" in conversations.get_conv_template(template.name).get_prompt()
+    assert conversations.get_conv_template(template.name).get_prompt() == (
+        "<|im_start|>user\nimage question<|im_end|>\n"
     )
     with pytest.raises(AssertionError, match="has been registered"):
         conversations.register_conv_template(template)
     replacement = template.copy()
     replacement.set_system_message("replacement system prompt")
     conversations.register_conv_template(replacement, override=True)
-    assert (
-        "replacement system prompt"
-        in conversations.get_conv_template(template.name).get_prompt()
+    assert conversations.get_conv_template(template.name).get_prompt() == (
+        "<|im_start|>system\nreplacement system prompt<|im_end|>\n"
+        "<|im_start|>user\nimage question<|im_end|>\n"
     )
 
 
