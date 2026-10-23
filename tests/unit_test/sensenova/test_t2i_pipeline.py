@@ -815,7 +815,10 @@ def test_image_edit_oom_uses_model_device_backend(
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_generation_runs_no_checkpoint_after_the_model_returns(
-    monkeypatch: pytest.MonkeyPatch, batched: bool
+    monkeypatch: pytest.MonkeyPatch,
+    batched: bool,
+    prefix_model: Mock,
+    tokenizer: PreTrainedTokenizerBase,
 ) -> None:
     """A cancellation check after the model returned discarded finished images and cost every TP request one more collective."""
     events: list[str] = []
@@ -838,7 +841,7 @@ def test_generation_runs_no_checkpoint_after_the_model_returns(
         events.append("model")
         return payloads
 
-    model = Mock()
+    model = prefix_model
     model.eval.return_value = model
     model.to.return_value = model
     monkeypatch.setattr(
@@ -850,7 +853,7 @@ def test_generation_runs_no_checkpoint_after_the_model_returns(
     monkeypatch.setattr(
         stages_module,
         "AutoTokenizer",
-        SimpleNamespace(from_pretrained=lambda model_path: Mock()),
+        SimpleNamespace(from_pretrained=lambda model_path: tokenizer),
     )
     monkeypatch.setattr(
         stages_module,
@@ -1634,3 +1637,94 @@ async def test_overlong_prompt_never_fans_out_to_tp_workers(
     assert result.type == "result"
     assert result.request_id == "valid"
     assert scheduler.compute_error is None
+
+
+@pytest.mark.parametrize("invalid_indices", [(0,), (1,), (0, 2), (0, 1, 2)])
+def test_batch_rejects_only_overlong_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix_model: Mock,
+    prefix_tokenizer: PreTrainedTokenizerFast,
+    t2i_generate_mock: Mock,
+    invalid_indices: tuple[int, ...],
+) -> None:
+    """An overlong prompt made compatible valid requests fail with the same 400."""
+    prefix_tokenizer.model_max_length = 512
+    prefix_model.eval.return_value = prefix_model
+    prefix_model.to.return_value = prefix_model
+    monkeypatch.setattr(stages_module, "register", lambda: None)
+    monkeypatch.setattr(
+        stages_module.AutoTokenizer,
+        "from_pretrained",
+        lambda model_path: prefix_tokenizer,
+    )
+    monkeypatch.setattr(
+        stages_module.AutoModel,
+        "from_pretrained",
+        lambda model_path, torch_dtype: prefix_model,
+    )
+    monkeypatch.setattr(
+        stages_module,
+        "resolve_concrete_device",
+        lambda device, gpu_id: torch.device("cpu"),
+    )
+    scheduler = stages_module.create_generation_executor(
+        "unused",
+        device="cpu",
+        dtype="bfloat16",
+        cooperative_cancellation=True,
+        max_batch_size=3,
+        enable_cache_dit=False,
+        dit_layerwise_offload=False,
+        dit_offload_prefetch_size=1,
+        dit_layerwise_resident_layers=0,
+        dit_layerwise_residency_policy="leading",
+        pin_cpu_memory=False,
+    )
+    scheduler.running = True
+    payloads = [
+        StagePayload(
+            str(index),
+            OmniRequest(
+                "cat " * 512 if index in invalid_indices else "cat",
+                {"width": 32, "height": 32, "seed": index},
+            ),
+            None,
+        )
+        for index in range(3)
+    ]
+    valid_indices = [index for index in range(3) if index not in invalid_indices]
+    t2i_generate_mock.return_value = torch.zeros(len(valid_indices), 3, 32, 32)
+    loop = asyncio.new_event_loop()
+    try:
+        scheduler.run_batch(
+            [
+                IncomingMessage(
+                    request_id=payload.request_id, type="new_request", data=payload
+                )
+                for payload in payloads
+            ],
+            loop,
+        )
+    finally:
+        loop.close()
+    messages = [scheduler.outbox.get_nowait() for _ in payloads]
+    assert [message.request_id for message in messages] == ["0", "1", "2"]
+    for index, message in enumerate(messages):
+        if index in invalid_indices:
+            assert message.type == "error"
+            assert generation_error_status_code(RuntimeError(str(message.data))) == 400
+            assert "maximum is 512 tokens" in str(message.data)
+        else:
+            assert message.type == "result"
+            with Image.open(
+                io.BytesIO(base64.b64decode(message.data.data["image_b64"]))
+            ) as image:
+                image.load()
+                assert image.size == (32, 32)
+    if valid_indices:
+        t2i_generate_mock.assert_called_once()
+        assert t2i_generate_mock.call_args.kwargs["seeds"] == valid_indices
+        assert t2i_generate_mock.call_args.args[2] == ["cat"] * len(valid_indices)
+    else:
+        t2i_generate_mock.assert_not_called()
+    assert scheduler.outbox.empty()

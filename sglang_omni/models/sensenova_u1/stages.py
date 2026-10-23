@@ -60,6 +60,7 @@ from sglang_omni.models.sensenova_u1.tensor_parallel import (
     validate_tp_settings,
 )
 from sglang_omni.models.weight_loader import resolve_dtype
+from sglang_omni.pipeline.umm import UMMRequestError
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
@@ -285,15 +286,36 @@ def create_generation_executor(
             generation_checkpoint()
             return generate_image(payload, model, tokenizer, cache_dit)
 
-    def _generate_batch(payloads: list[StagePayload]) -> list[StagePayload]:
+    def _generate_batch(
+        payloads: list[StagePayload],
+    ) -> list[StagePayload | UMMRequestError]:
+        results: list[StagePayload | UMMRequestError] = []
+        valid_payloads: list[StagePayload] = []
+        valid_indices: list[int] = []
+        for index, payload in enumerate(payloads):
+            try:
+                validate_generation_request(payload, model, cache_dit, tokenizer)
+            except UMMRequestError as error:
+                results.append(error)
+            else:
+                results.append(payload)
+                valid_payloads.append(payload)
+                valid_indices.append(index)
+        if not valid_payloads:
+            return results
+        else:
+            pass
         cancellation = (
-            GenerationScope(payloads, _should_cancel, resolved_device, tp_group)
+            GenerationScope(valid_payloads, _should_cancel, resolved_device, tp_group)
             if cooperative_cancellation
             else nullcontext()
         )
         with cancellation, offload.request() if offload is not None else nullcontext():
             generation_checkpoint()
-            return generate_images(payloads, model, tokenizer, cache_dit)
+            generated = generate_images(valid_payloads, model, tokenizer, cache_dit)
+        for index, result in zip(valid_indices, generated, strict=True):
+            results[index] = result
+        return results
 
     def _shutdown() -> None:
         try:
