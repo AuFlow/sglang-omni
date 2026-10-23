@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from typing import Literal
 
 import torch
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, PreTrainedTokenizerBase
 
 from sglang_omni.models.sensenova_u1.admission import validate_output_dimensions
 from sglang_omni.models.sensenova_u1.cache_dit import SenseNovaCacheDit
@@ -26,12 +26,20 @@ from sglang_omni.models.sensenova_u1.generation import (
 )
 from sglang_omni.models.sensenova_u1.image_processing import (
     decode_reference_images,
-    resolve_reference_output_size,
+    reference_image_size,
+    resolve_edit_output_size,
 )
 from sglang_omni.models.sensenova_u1.neo_unify import register
 from sglang_omni.models.sensenova_u1.neo_unify.attention_backend import (
     npu_fia_available,
     npu_swiglu_available,
+)
+from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
+    build_t2i_queries,
+    encode_generation_query,
+)
+from sglang_omni.models.sensenova_u1.neo_unify.image_conditioned_generation import (
+    build_it2i_queries,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import NEOChatModel
 from sglang_omni.models.sensenova_u1.offload import (
@@ -116,7 +124,10 @@ def image_generation_batch_key(
 
 
 def validate_generation_request(
-    payload: StagePayload, model: NEOChatModel, cache_dit: SenseNovaCacheDit
+    payload: StagePayload,
+    model: NEOChatModel,
+    cache_dit: SenseNovaCacheDit,
+    tokenizer: PreTrainedTokenizerBase,
 ) -> None:
     """Reject invalid TP work before the leader dispatches it to other ranks."""
     inputs = payload.request.inputs
@@ -128,7 +139,19 @@ def validate_generation_request(
         else:
             pass
         options = SenseNovaU1ImageEditSampling.from_params(payload.request.params)
-        width, height = resolve_reference_output_size(inputs.get("image_b64"), options)
+        references = decode_reference_images(inputs.get("image_b64"))
+        try:
+            reference_sizes = [
+                reference_image_size(
+                    image.width, image.height, len(references), options
+                )
+                for image in references
+            ]
+        finally:
+            for image in references:
+                image.close()
+        width, height = resolve_edit_output_size(reference_sizes[0], options)
+        queries = build_it2i_queries(model, prompt, reference_sizes, options)
         validate_output_dimensions(payload.request, width, height)
         branch_count = image_guidance_branch_count(
             options.guidance_scale, options.img_cfg_scale
@@ -136,6 +159,13 @@ def validate_generation_request(
     else:
         options = text_to_image_options(payload)
         branch_count = 2 if options.guidance_scale > 1 else 1
+        queries = [
+            query
+            for branch in build_t2i_queries(model, [inputs], options.guidance_scale)
+            for query in branch
+        ]
+    for query in queries:
+        encode_generation_query(model, tokenizer, query)
     enabled = (
         cache_dit.enabled_by_default
         if options.enable_cache_dit is None
@@ -281,7 +311,7 @@ def create_generation_executor(
                 pass
 
     def _validate(payload: StagePayload) -> None:
-        validate_generation_request(payload, model, cache_dit)
+        validate_generation_request(payload, model, cache_dit, tokenizer)
 
     if tp_size > 1 and cooperative_cancellation:
         scheduler = SenseNovaTensorParallelScheduler(

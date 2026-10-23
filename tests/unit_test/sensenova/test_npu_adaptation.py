@@ -128,6 +128,7 @@ def test_randn_supports_per_sample_seeds():
 
 
 class FakeTokenizer:
+    model_max_length = 128
     pad_token_id = None
     eos_token_id = 2
 
@@ -138,7 +139,10 @@ class FakeTokenizer:
 
 
 def test_builds_padded_batched_text_inputs():
-    model = SimpleNamespace(device=torch.device("cpu"))
+    model = SimpleNamespace(
+        device=torch.device("cpu"),
+        config=SimpleNamespace(llm_config=SimpleNamespace(max_position_embeddings=129)),
+    )
 
     input_ids, indexes, attention_mask, valid_mask, prefix_lengths = (
         build_t2i_text_inputs(model, FakeTokenizer(), ["short", "a much longer prompt"])
@@ -172,7 +176,10 @@ def test_position_indexes_support_batched_inputs():
 
 
 def test_singleton_text_matches_valid_batched_tokens():
-    model = SimpleNamespace(device=torch.device("cpu"))
+    model = SimpleNamespace(
+        device=torch.device("cpu"),
+        config=SimpleNamespace(llm_config=SimpleNamespace(max_position_embeddings=129)),
+    )
     tokenizer = FakeTokenizer()
     batched = build_t2i_text_inputs(model, tokenizer, ["short", "a much longer prompt"])
     for index, prompt in enumerate(["short", "a much longer prompt"]):

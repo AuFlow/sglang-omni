@@ -24,43 +24,27 @@ from sglang_omni.models.sensenova_u1.neo_unify.utils import (
 from sglang_omni.models.sensenova_u1.sampling import SenseNovaU1ImageEditSampling
 
 
-@torch.no_grad()
-def it2i_generate(
+def build_it2i_queries(
     model: NEOChatModel,
-    tokenizer: PreTrainedTokenizerBase,
     prompt: str,
-    images: list[Image.Image],
-    *,
+    reference_sizes: list[tuple[int, int]],
     sampling: SenseNovaU1ImageEditSampling,
-) -> torch.Tensor:
-    model.img_context_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
-    model.img_start_token_id = tokenizer.convert_tokens_to_ids("<img>")
+) -> list[str]:
     image_placeholders = prompt.count("<image>")
-    assert len(images) >= image_placeholders
-    if len(images) > image_placeholders:
-        if image_placeholders == 0 and len(images) > 1:
+    assert len(reference_sizes) >= image_placeholders
+    if len(reference_sizes) > image_placeholders:
+        if image_placeholders == 0 and len(reference_sizes) > 1:
             prompt = (
-                "".join(f"Image-{index + 1}:<image>\n" for index in range(len(images)))
+                "".join(
+                    f"Image-{index + 1}:<image>\n"
+                    for index in range(len(reference_sizes))
+                )
                 + prompt
             )
         else:
-            prompt = "<image>\n" * (len(images) - image_placeholders) + prompt
+            prompt = "<image>\n" * (len(reference_sizes) - image_placeholders) + prompt
     else:
         pass
-    reference_patches: list[torch.Tensor] = []
-    reference_grids: list[torch.Tensor] = []
-    for image in images:
-        image_patches, image_grid = load_image_native(
-            image, model.patch_size, model.downsample_ratio
-        )
-        reference_patches.append(
-            image_patches.to(
-                device=model.device, dtype=next(model.vision_model.parameters()).dtype
-            )
-        )
-        reference_grids.append(image_grid.to(model.device))
-    pixel_values = torch.cat(reference_patches)
-    grid_shape = torch.cat(reference_grids)
     queries = [
         build_t2i_query(
             model,
@@ -77,7 +61,9 @@ def it2i_generate(
             or sampling.guidance_scale != sampling.img_cfg_scale
         ):
             queries.append(
-                build_t2i_query(model, "<image>" * len(images), append_text="<img>")
+                build_t2i_query(
+                    model, "<image>" * len(reference_sizes), append_text="<img>"
+                )
             )
         else:
             pass
@@ -85,12 +71,45 @@ def it2i_generate(
             queries.append(build_t2i_query(model, "", append_text="<img>"))
         else:
             pass
-    for image_grid in grid_shape:
+    for width_pixels, height_pixels in reference_sizes:
         image_token_count = int(
-            image_grid[0] * image_grid[1] * model.downsample_ratio**2
+            (height_pixels // model.patch_size)
+            * (width_pixels // model.patch_size)
+            * model.downsample_ratio**2
         )
         image_tokens = "<img>" + "<IMG_CONTEXT>" * image_token_count + "</img>"
         queries = [query.replace("<image>", image_tokens, 1) for query in queries]
+    return queries
+
+
+@torch.no_grad()
+def it2i_generate(
+    model: NEOChatModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt: str,
+    images: list[Image.Image],
+    *,
+    sampling: SenseNovaU1ImageEditSampling,
+) -> torch.Tensor:
+    model.img_context_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+    model.img_start_token_id = tokenizer.convert_tokens_to_ids("<img>")
+    reference_patches: list[torch.Tensor] = []
+    reference_grids: list[torch.Tensor] = []
+    for image in images:
+        image_patches, image_grid = load_image_native(
+            image, model.patch_size, model.downsample_ratio
+        )
+        reference_patches.append(
+            image_patches.to(
+                device=model.device, dtype=next(model.vision_model.parameters()).dtype
+            )
+        )
+        reference_grids.append(image_grid.to(model.device))
+    pixel_values = torch.cat(reference_patches)
+    grid_shape = torch.cat(reference_grids)
+    queries = build_it2i_queries(
+        model, prompt, [image.size for image in images], sampling
+    )
     image_patch_size = model.patch_size * int(1 / model.downsample_ratio)
     prefixes: list[ImagePrefix] = []
     for query in queries:

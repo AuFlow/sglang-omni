@@ -17,6 +17,7 @@ from sglang_omni.models.sensenova_u1.sampling import (
     MIN_INPUT_MAX_PIXELS,
     SenseNovaU1ImageEditSampling,
 )
+from sglang_omni.pipeline.umm import UMMRequestError
 from sglang_omni.proto.request import StagePayload
 
 DEFAULT_INPUT_MAX_PIXELS = 2048 * 2048
@@ -117,7 +118,9 @@ def decode_reference_images(value: str | list[str] | None) -> list[Image.Image]:
     ) as exc:
         for image in images:
             image.close()
-        raise ValueError("SenseNova-U1 received an invalid reference image") from exc
+        raise UMMRequestError(
+            "SenseNova-U1 received an invalid reference image"
+        ) from exc
     return images
 
 

@@ -12,7 +12,10 @@ import pytest
 import torch
 from fastapi.testclient import TestClient
 from PIL import Image
-from transformers import PreTrainedTokenizerBase
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import PreTrainedTokenizerBase, PreTrainedTokenizerFast
 
 import sglang_omni.models.sensenova_u1.generation as generation_module
 import sglang_omni.models.sensenova_u1.stages as stages_module
@@ -35,6 +38,10 @@ from sglang_omni.models.sensenova_u1.image_processing import (
     resolve_reference_output_size,
 )
 from sglang_omni.models.sensenova_u1.images_api import register_images_api
+from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
+    build_it2i_inputs,
+    build_t2i_text_inputs,
+)
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import NEOChatModel
 from sglang_omni.models.sensenova_u1.sampling import SenseNovaU1ImageEditSampling
 from sglang_omni.models.sensenova_u1.tensor_parallel import (
@@ -111,8 +118,40 @@ async def test_image_result_cancellation_aborts_backend_and_closes_stream(discon
 
 @pytest.fixture
 def tokenizer() -> PreTrainedTokenizerBase:
-    return create_autospec(
-        PreTrainedTokenizerBase, instance=True, return_value={"input_ids": [1, 2, 3]}
+    tokenizer = create_autospec(
+        PreTrainedTokenizerBase,
+        instance=True,
+        return_value={"input_ids": torch.tensor([[1, 2, 3]])},
+    )
+    tokenizer.model_max_length = 12288
+    return tokenizer
+
+
+@pytest.fixture
+def prefix_model() -> Mock:
+    return Mock(
+        spec=NEOChatModel,
+        language_model=Mock(),
+        template="neo1_0",
+        system_message="",
+        patch_size=16,
+        downsample_ratio=0.5,
+        device=torch.device("cpu"),
+        config=SimpleNamespace(
+            llm_config=SimpleNamespace(max_position_embeddings=16384)
+        ),
+    )
+
+
+@pytest.fixture
+def prefix_tokenizer() -> PreTrainedTokenizerFast:
+    backend = Tokenizer(WordLevel({"[UNK]": 0, "cat": 1}, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        model_max_length=128,
+        additional_special_tokens=["<IMG_CONTEXT>"],
     )
 
 
@@ -873,6 +912,7 @@ def test_multi_output_failure_cleans_cache_controller(
     [(1.0, 1.0, 1), (4.0, 4.0, 2), (0.5, 1.0, 2)],
 )
 def test_i2i_stage_overrides_match_cost_and_tp_validation(
+    prefix_model: Mock,
     it2i_generate_mock: Mock,
     tokenizer: PreTrainedTokenizerBase,
     guidance_scale: float,
@@ -909,7 +949,7 @@ def test_i2i_stage_overrides_match_cost_and_tp_validation(
         ),
         None,
     )
-    model = Mock()
+    model = prefix_model
     cache_dit = create_autospec(SenseNovaCacheDit, instance=True)
     cache_dit.enabled_by_default = True
     output_width_pixels, output_height_pixels = (96, 64) if size_explicit else (96, 96)
@@ -922,7 +962,7 @@ def test_i2i_stage_overrides_match_cost_and_tp_validation(
             == 96 * 64 * 4 * branch_count
         )
     open_image.assert_not_called()
-    stages_module.validate_generation_request(payload, model, cache_dit)
+    stages_module.validate_generation_request(payload, model, cache_dit, tokenizer)
     assert cache_dit.validate_request.call_args.kwargs["steps"] == 4
     result = generation_module.generate_image(payload, model, tokenizer, cache_dit)
     assert cache_dit.prepare.call_args.kwargs["steps"] == 4
@@ -953,6 +993,8 @@ def test_i2i_stage_overrides_match_cost_and_tp_validation(
 @pytest.mark.parametrize("reference_size_pixels", [(64, 32), (96, 64)])
 def test_i2i_validation_decodes_references_without_resizing(
     cache_dit: SenseNovaCacheDit,
+    prefix_model: Mock,
+    tokenizer: PreTrainedTokenizerBase,
     reference_count: int,
     do_resize: bool,
     reference_size_pixels: tuple[int, int],
@@ -977,7 +1019,7 @@ def test_i2i_validation_decodes_references_without_resizing(
         ),
         None,
     )
-    model = Mock()
+    model = prefix_model
     with (
         patch.object(
             Image.Image, "load", autospec=True, side_effect=Image.Image.load
@@ -990,7 +1032,7 @@ def test_i2i_validation_decodes_references_without_resizing(
             output_width_pixels,
             output_height_pixels,
         )
-        stages_module.validate_generation_request(payload, model, cache_dit)
+        stages_module.validate_generation_request(payload, model, cache_dit, tokenizer)
     load.assert_called()
     resize.assert_not_called()
 
@@ -1001,6 +1043,7 @@ def test_i2i_validation_decodes_references_without_resizing(
 @pytest.mark.parametrize("cooperative_cancellation", [False, True])
 async def test_truncated_image_is_rejected_before_tp_fanout(
     cache_dit: SenseNovaCacheDit,
+    prefix_model: Mock,
     it2i_generate_mock: Mock,
     tokenizer: PreTrainedTokenizerBase,
     invalid_reference_index: int,
@@ -1040,14 +1083,14 @@ async def test_truncated_image_is_rejected_before_tp_fanout(
         ),
         None,
     )
-    model = Mock()
+    model = prefix_model
     it2i_generate_mock.return_value = torch.zeros(1, 3, 32, 64)
 
     def compute(payload: StagePayload) -> StagePayload:
         return generation_module.generate_image(payload, model, tokenizer, cache_dit)
 
     def validate(payload: StagePayload) -> None:
-        stages_module.validate_generation_request(payload, model, cache_dit)
+        stages_module.validate_generation_request(payload, model, cache_dit, tokenizer)
 
     scheduler = (
         SenseNovaTensorParallelScheduler(
@@ -1077,7 +1120,14 @@ async def test_truncated_image_is_rejected_before_tp_fanout(
 
     await leader.execute(invalid)
     leader.send_failure.assert_awaited_once_with(
-        "invalid", "SenseNova-U1 received an invalid reference image"
+        "invalid",
+        "Invalid UMM request: SenseNova-U1 received an invalid reference image",
+    )
+    assert (
+        generation_error_status_code(
+            RuntimeError(leader.send_failure.call_args.args[1])
+        )
+        == 400
     )
     fanout.fanout_work.assert_not_called()
     assert scheduler.inbox.empty()
@@ -1119,7 +1169,7 @@ def test_invalid_edit_seed_is_rejected_before_tp_execution(
     )
     model = Mock()
     with pytest.raises(ValueError, match="seed"):
-        stages_module.validate_generation_request(payload, model, cache_dit)
+        stages_module.validate_generation_request(payload, model, cache_dit, tokenizer)
     with pytest.raises(ValueError, match="seed"):
         generation_module.generate_image(payload, model, tokenizer, cache_dit)
     it2i_generate_mock.assert_not_called()
@@ -1432,3 +1482,155 @@ def test_generate_stage_params_layer_onto_t2i_options():
     assert options.num_inference_steps == 2
     assert options.guidance_scale == 3.0
     assert options.seed == 7
+
+
+@pytest.mark.parametrize("input_kind", ["text", "batch", "edit"])
+@pytest.mark.parametrize("limit_source", ["tokenizer", "model"])
+def test_overlong_prefix_is_rejected_before_device_allocation(
+    prefix_model: Mock,
+    prefix_tokenizer: PreTrainedTokenizerFast,
+    input_kind: Literal["text", "batch", "edit"],
+    limit_source: Literal["tokenizer", "model"],
+) -> None:
+    """Overlong prompts allocated quadratic attention masks instead of returning 400."""
+    if limit_source == "model":
+        prefix_model.config.llm_config.max_position_embeddings = 129
+        prefix_tokenizer.model_max_length = 16384
+    else:
+        pass
+    prefix_model.device = torch.device("meta")
+    query = "cat " * 129
+    with pytest.raises(UMMRequestError, match="maximum is 128 tokens") as raised:
+        if input_kind == "edit":
+            build_it2i_inputs(prefix_model, prefix_tokenizer, query)
+        else:
+            build_t2i_text_inputs(
+                prefix_model,
+                prefix_tokenizer,
+                ["cat", query] if input_kind == "batch" else query,
+            )
+    assert generation_error_status_code(RuntimeError(str(raised.value))) == 400
+    prefix_model.language_model.get_input_embeddings.assert_not_called()
+
+    prefix_model.device = torch.device("cpu")
+    token_ids, _, _, _, token_lengths = build_t2i_text_inputs(
+        prefix_model, prefix_tokenizer, "cat " * 128
+    )
+    assert token_ids.shape == (1, 128)
+    assert token_lengths.tolist() == [128]
+
+
+@pytest.mark.parametrize("validation_path", ["preflight", "execution"])
+def test_truncated_jpeg_is_a_bad_request(
+    prefix_model: Mock,
+    prefix_tokenizer: PreTrainedTokenizerFast,
+    cache_dit: SenseNovaCacheDit,
+    validation_path: Literal["preflight", "execution"],
+) -> None:
+    """A JPEG passing header verification returned 500 when pixel decoding failed."""
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (64, 32), (80, 100, 130)).save(image_buffer, format="JPEG")
+    truncated = image_buffer.getvalue()[:-2]
+    with Image.open(io.BytesIO(truncated)) as image:
+        image.verify()
+    payload = StagePayload(
+        "invalid",
+        OmniRequest(
+            {
+                "task": "image_edit",
+                "prompt": "cat",
+                "image_b64": base64.b64encode(truncated).decode("ascii"),
+            },
+            {"do_resize": False},
+        ),
+        None,
+    )
+    with pytest.raises(UMMRequestError, match="invalid reference image") as raised:
+        if validation_path == "preflight":
+            stages_module.validate_generation_request(
+                payload, prefix_model, cache_dit, prefix_tokenizer
+            )
+        else:
+            generation_module.generate_image(
+                payload, prefix_model, prefix_tokenizer, cache_dit
+            )
+    assert generation_error_status_code(RuntimeError(str(raised.value))) == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_kind", ["text", "edit_text", "edit_references"])
+@pytest.mark.parametrize("cooperative_cancellation", [False, True])
+async def test_overlong_prompt_never_fans_out_to_tp_workers(
+    prefix_model: Mock,
+    prefix_tokenizer: PreTrainedTokenizerFast,
+    cache_dit: SenseNovaCacheDit,
+    request_kind: Literal["text", "edit_text", "edit_references"],
+    cooperative_cancellation: bool,
+) -> None:
+    """Unbounded text and expanded image tokens reached TP compute and stopped its workers."""
+    parameters = {"do_resize": False, "width": 32, "height": 32}
+    prefix_tokenizer.model_max_length = 512
+    prompt = "cat " * 512
+    if request_kind == "text":
+        inputs = prompt
+    else:
+        image_buffer = io.BytesIO()
+        size = (1024, 1024) if request_kind == "edit_references" else (32, 32)
+        Image.new("RGB", size).save(image_buffer, format="PNG")
+        inputs = {
+            "task": "image_edit",
+            "prompt": "cat" if request_kind == "edit_references" else prompt,
+            "image_b64": base64.b64encode(image_buffer.getvalue()).decode("ascii"),
+        }
+    invalid = StagePayload("invalid", OmniRequest(inputs, parameters), None)
+    valid = StagePayload("valid", OmniRequest("cat", {"width": 32, "height": 32}), None)
+
+    def compute(payload: StagePayload) -> StagePayload:
+        return payload
+
+    def validate(payload: StagePayload) -> None:
+        stages_module.validate_generation_request(
+            payload, prefix_model, cache_dit, prefix_tokenizer
+        )
+
+    scheduler = (
+        SenseNovaTensorParallelScheduler(
+            compute,
+            report_cancellation=True,
+            validate_request=validate,
+            shutdown_join_timeout_s=5.0,
+        )
+        if cooperative_cancellation
+        else TensorParallelScheduler(
+            compute, validate_request=validate, shutdown_join_timeout_s=5.0
+        )
+    )
+    fanout = Mock()
+    leader = Stage(
+        name="generate",
+        role="leader",
+        get_next=lambda request_id, output: None,
+        gpu_id=None,
+        endpoints={},
+        control_plane=RecordingStageControlPlane(),
+        relay=FakeRelay(),
+        scheduler=scheduler,
+        tp_fanout=fanout,
+    )
+    leader.send_failure = AsyncMock()
+    await leader.execute(invalid)
+    leader.send_failure.assert_awaited_once()
+    error = RuntimeError(leader.send_failure.call_args.args[1])
+    assert generation_error_status_code(error) == 400
+    assert "maximum is 512 tokens" in str(error)
+    fanout.fanout_work.assert_not_called()
+    assert scheduler.inbox.empty()
+    assert scheduler.compute_error is None
+
+    await leader.execute(valid)
+    fanout.fanout_work.assert_called_once_with(valid)
+    scheduler.run_single(scheduler.inbox.get_nowait(), asyncio.get_running_loop())
+    result = scheduler.outbox.get_nowait()
+    assert result.type == "result"
+    assert result.request_id == "valid"
+    assert scheduler.compute_error is None

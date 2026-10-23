@@ -11,6 +11,8 @@ from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import NEOChatM
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_vit import (
     build_abs_positions_from_grid_hw,
 )
+from sglang_omni.models.sensenova_u1.neo_unify.utils import SYSTEM_MESSAGE_FOR_GEN
+from sglang_omni.pipeline.umm import UMMRequestError
 
 # Modified for SGLang; see this directory's README.md for upstream source.
 
@@ -70,6 +72,44 @@ def build_t2i_query(
     return template.get_prompt()
 
 
+def build_t2i_queries(
+    model: NEOChatModel, prompts: list[str], guidance_scale: float
+) -> list[list[str]]:
+    queries = [
+        [
+            build_t2i_query(
+                model,
+                prompt,
+                system_message=SYSTEM_MESSAGE_FOR_GEN,
+                append_text="<think>\n\n</think>\n\n<img>",
+            )
+            for prompt in prompts
+        ]
+    ]
+    if guidance_scale > 1:
+        queries.append([build_t2i_query(model, "", append_text="<img>")])
+    else:
+        pass
+    return queries
+
+
+def encode_generation_query(
+    model: NEOChatModel, tokenizer: PreTrainedTokenizerBase, query: str
+) -> torch.Tensor:
+    token_ids = tokenizer(query, return_tensors="pt")["input_ids"][0]
+    # note (Wes): Generated image patches use the next temporal position after the prefix.
+    max_prefix_tokens = min(
+        tokenizer.model_max_length, model.config.llm_config.max_position_embeddings - 1
+    )
+    if token_ids.numel() > max_prefix_tokens:
+        raise UMMRequestError(
+            f"SenseNova-U1 input contains {token_ids.numel()} tokens after template "
+            f"and reference expansion; maximum is {max_prefix_tokens} tokens"
+        )
+    else:
+        return token_ids
+
+
 def build_t2i_text_inputs(
     model: NEOChatModel, tokenizer: PreTrainedTokenizerBase, query: str | list[str]
 ) -> tuple[
@@ -80,7 +120,7 @@ def build_t2i_text_inputs(
         raise ValueError("query batch must not be empty")
     else:
         pass
-    encoded = [tokenizer(item, return_tensors="pt")["input_ids"][0] for item in queries]
+    encoded = [encode_generation_query(model, tokenizer, query) for query in queries]
     lengths = [item.shape[0] for item in encoded]
     prefix_lengths = torch.tensor(lengths, dtype=torch.long, device=model.device)
     max_length = max(lengths)
@@ -155,8 +195,9 @@ def build_it2i_inputs(
     pixel_values: torch.Tensor | None = None,
     grid_hw: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-    model_inputs = tokenizer(query, return_tensors="pt")
-    input_ids = model_inputs["input_ids"].to(model.device)
+    input_ids = (
+        encode_generation_query(model, tokenizer, query).unsqueeze(0).to(model.device)
+    )
 
     indexes = get_thw_indexes(model, input_ids[0], grid_hw)
 

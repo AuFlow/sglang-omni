@@ -8,7 +8,7 @@ from sglang_omni.models.sensenova_u1.neo_unify.generation_forward import (
 )
 from sglang_omni.models.sensenova_u1.neo_unify.generation_inputs import (
     build_t2i_image_indexes,
-    build_t2i_query,
+    build_t2i_queries,
     build_t2i_text_inputs,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.image_denoise import (
@@ -16,7 +16,6 @@ from sglang_omni.models.sensenova_u1.neo_unify.image_denoise import (
     denoise_images,
 )
 from sglang_omni.models.sensenova_u1.neo_unify.modeling_neo_chat import NEOChatModel
-from sglang_omni.models.sensenova_u1.neo_unify.utils import SYSTEM_MESSAGE_FOR_GEN
 from sglang_omni.models.sensenova_u1.sampling import SenseNovaU1Sampling
 
 
@@ -41,21 +40,7 @@ def t2i_generate(
         raise ValueError("Each batched prompt requires one generation seed")
     else:
         pass
-    queries = [
-        [
-            build_t2i_query(
-                model,
-                text,
-                system_message=SYSTEM_MESSAGE_FOR_GEN,
-                append_text="<think>\n\n</think>\n\n<img>",
-            )
-            for text in prompts
-        ]
-    ]
-    if sampling.guidance_scale > 1:
-        queries.append([build_t2i_query(model, "", append_text="<img>")])
-    else:
-        pass
+    queries = build_t2i_queries(model, prompts, sampling.guidance_scale)
     image_patch_size = model.patch_size * int(1 / model.downsample_ratio)
     prefixes: list[ImagePrefix] = []
     for branch_queries in queries:
