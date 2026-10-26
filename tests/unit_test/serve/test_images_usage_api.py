@@ -15,17 +15,8 @@ from sglang_omni.serve.openai_api import create_app
 @pytest.mark.parametrize("editing", [False, True])
 @pytest.mark.parametrize("outputs", [1, 3])
 @pytest.mark.parametrize("fail_after_image", [False, True])
-@pytest.mark.parametrize(
-    "dimensions",
-    [
-        {"size": "64x32"},
-        {"width": "64", "height": "32"},
-        {"size": "128x32", "width": "64"},
-        {"size": "64x128", "height": "32"},
-    ],
-)
 def test_images_usage_and_complete_result_consumption(
-    editing: bool, outputs: int, fail_after_image: bool, dimensions: dict
+    editing: bool, outputs: int, fail_after_image: bool
 ) -> None:
     buffer = io.BytesIO()
     Image.new("RGB", (64, 32)).save(buffer, format="PNG")
@@ -40,10 +31,14 @@ def test_images_usage_and_complete_result_consumption(
             self, request: GenerateRequest, request_id: str
         ) -> AsyncIterator[GenerateChunk]:
             if not editing:
-                assert request.extra_params["width"] == 64
-                assert request.extra_params["height"] == 32
-                assert request.extra_params["enable_cache_dit"] is True
-                assert request.extra_params["cache_dit_params"] == {"Fn_compute_blocks": 2}
+                assert request.extra_params == {
+                    "width": 64,
+                    "height": 32,
+                    "num_inference_steps": 50,
+                    "guidance_scale": 4.0,
+                    "seed": 42,
+                    "n": outputs,
+                }
             yield self._default_result_builder(
                 request_id,
                 {
@@ -81,12 +76,12 @@ def test_images_usage_and_complete_result_consumption(
                 "/v1/images/generations",
                 json={
                     "prompt": "a red mug",
+                    "size": "64x32",
                     "n": outputs,
-                    **dimensions,
-                    "extra_body": {
-                        "enable_cache_dit": True,
-                        "cache_dit_params": {"Fn_compute_blocks": 2},
-                    },
+                    "return_stage_metrics": True,
+                    "bot_task": "think",
+                    "sys_type": "en_unified",
+                    "system_prompt": "custom prompt",
                 },
             )
     assert response.status_code == (500 if fail_after_image else 200)
@@ -104,3 +99,32 @@ def test_images_usage_and_complete_result_consumption(
         }
         assert result["usage"]["image_count"] == outputs
         assert (result["usage"]["width"], result["usage"]["height"]) == (64, 32)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"n": 0},
+        {"n": 11},
+        {"seed": -1},
+        {"num_inference_steps": 0},
+        {"guidance_scale": -1},
+        {"response_format": "url"},
+    ],
+)
+def test_unknown_extensions_do_not_bypass_known_field_validation(fields):
+    class UnusedClient(Client):
+        def __init__(self):
+            super().__init__(None)
+
+        async def generate(self, *args, **kwargs):
+            raise AssertionError("Invalid requests must not reach inference")
+
+    with TestClient(
+        create_app(UnusedClient(), model_name="test", architectures=["NEOChatModel"])
+    ) as client:
+        response = client.post(
+            "/v1/images/generations",
+            json={"prompt": "a red mug", "return_stage_metrics": True, **fields},
+        )
+    assert response.status_code == 422

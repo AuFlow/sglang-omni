@@ -1068,7 +1068,7 @@ def _build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
 
 def _register_image_generations(app: FastAPI) -> None:
     """Expose the native SenseNova T2I stage as a minimal Images API."""
-    from sglang_omni.serve.image_request import resolve_image_generation_params
+    from sglang_omni.models.sensenova_u1.sampling import SenseNovaU1Sampling
 
     @app.post("/v1/images/generations", response_model=ImageGenerationResponse)
     async def image_generations(
@@ -1077,7 +1077,24 @@ def _register_image_generations(app: FastAPI) -> None:
         if req.model is not None and req.model != app.state.model_name:
             raise HTTPException(status_code=400, detail="Unknown image model")
         try:
-            params = resolve_image_generation_params(req)
+            width_str, height_str = req.size.split("x")
+            params = {
+                "width": int(width_str),
+                "height": int(height_str),
+                "num_inference_steps": req.num_inference_steps,
+                "guidance_scale": req.guidance_scale,
+                "seed": req.seed,
+                "n": req.n,
+            }
+            if req.enable_cache_dit is not None:
+                params["enable_cache_dit"] = req.enable_cache_dit
+            else:
+                pass
+            if req.cache_dit_params is not None:
+                params["cache_dit_params"] = req.cache_dit_params
+            else:
+                pass
+            SenseNovaU1Sampling.from_params(params)
             if not req.prompt.strip():
                 raise ValueError("SenseNova-U1 requires a non-empty text prompt")
         except ValueError as exc:
@@ -1098,9 +1115,9 @@ def _register_image_generations(app: FastAPI) -> None:
             images = chunk.images_b64 or (
                 [chunk.image_b64] if chunk.image_b64 is not None else []
             )
-            if len(images) != params["n"]:
+            if len(images) != req.n:
                 raise RuntimeError(
-                    f"SenseNova-U1 expected {params['n']} images, got {len(images)}"
+                    f"SenseNova-U1 expected {req.n} images, got {len(images)}"
                 )
             else:
                 pass

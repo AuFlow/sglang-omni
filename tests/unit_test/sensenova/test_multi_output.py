@@ -36,18 +36,14 @@ def payload(n: int = 1) -> StagePayload:
 
 
 @pytest.mark.parametrize("n", [1, 2, 4, 10])
-@pytest.mark.parametrize("explicit_seeds", [False, True])
 def test_native_outputs_and_seed_order(
-    n: int, tokenizer: PreTrainedTokenizerBase, explicit_seeds: bool
+    n: int, tokenizer: PreTrainedTokenizerBase
 ) -> None:
     model = Mock()
     model.t2i_generate.return_value = torch.stack(
         [torch.full((3, 32, 32), -1 + i / 8) for i in range(n)]
     )
     request = payload(n)
-    seeds = [9 + 3 * index for index in range(n)] if explicit_seeds else list(range(7, 7 + n))
-    if explicit_seeds:
-        request.request.params["seed"] = seeds
     generate_image(request, model, tokenizer)
     assert request.data["image_usage"] == {
         "input_tokens": 3,
@@ -58,7 +54,7 @@ def test_native_outputs_and_seed_order(
     assert model.t2i_generate.call_args.args[1] == "a cat"
     assert model.t2i_generate.call_args.kwargs["batch_size"] == n
     assert model.t2i_generate.call_args.kwargs["seed"] == (
-        seeds[0] if n == 1 else seeds
+        7 if n == 1 else list(range(7, 7 + n))
     )
     outputs = [request.data["image_b64"]] if n == 1 else request.data["images_b64"]
     assert len(outputs) == n

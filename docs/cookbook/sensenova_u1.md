@@ -129,31 +129,10 @@ The response follows the Images API shape:
 support `n` from 1 to 10 and return base64 PNG images. Image edits support one
 output image. Both routes require `think_mode=false`.
 
-Text-to-image `n` is clamped to 1 through 10, matching SGLang's Images API;
-`null`, zero, and negative values resolve to 1. A scalar `seed` generates
-outputs with seeds `seed`, `seed + 1`, and so on. A seed list must contain
-exactly the resolved `n` non-negative integers and is used in its supplied
-order. Invalid seeds are rejected before inference.
-
-Explicit `null` for `seed`, `num_inference_steps`, or `guidance_scale` uses
-the model defaults (42, 50, and 4.0). `size: null` leaves dimensions to the
-model defaults (2048 by 2048), with independent `width`/`height` overrides
-still supported. `response_format: null` uses the supported base64 response.
-
-For compatibility with existing text-to-image scripts, `/v1/images/generations`
-also accepts independent `width` and `height` fields, for example
-`"width": "1024", "height": "1024"`. Integers and numeric strings are accepted.
-Each supplied field overrides the corresponding dimension in `size`.
-An omitted dimension comes from `size` (which defaults to `2048x2048`).
-The same positive-multiple-of-32 requirement applies. Extra fields are accepted
-and retained in the request model. For text-to-image Cache-DiT options,
-non-null top-level values take precedence over `extra_body`, `extra_json`,
-`extra_args`, and `extra_params`, in that order. These containers accept JSON
-objects or JSON strings; nested `extra_params` objects are also supported.
-Malformed containers are skipped, matching SGLang's transport behavior.
-Resolved cache options are validated before inference. Ordinary protocol fields
-such as `seed` and `width` are not promoted from these containers. Other extras
-only affect inference if explicitly read by the generation route.
+The text-to-image endpoint accepts unknown extension fields for compatibility
+with shared clients and benchmarks. Fields such as `return_stage_metrics`,
+`bot_task`, `sys_type`, and `system_prompt` are ignored and do not enable those
+features. Recognized fields retain their existing validation and defaults.
 
 ## Cache-DiT Acceleration
 

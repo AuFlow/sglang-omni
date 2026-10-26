@@ -174,9 +174,9 @@ def _generate_text_to_image(
             batch_size=options.n,
             thinking_backend=None,
             seed=(
-                options.output_seeds[0]
+                options.seed
                 if options.n == 1
-                else options.output_seeds
+                else [options.seed + index for index in range(options.n)]
             ),
             image_size=(options.width, options.height),
             cfg_scale=options.guidance_scale,
@@ -268,7 +268,7 @@ def _generate_text_to_image_batch(
             prompts,
             batch_size=len(payloads),
             thinking_backend=None,
-            seed=[item.output_seeds[0] for item in options],
+            seed=[item.seed for item in options],
             image_size=(first.width, first.height),
             cfg_scale=first.guidance_scale,
             cfg_norm="none",
